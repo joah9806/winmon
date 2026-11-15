@@ -46,6 +46,16 @@ CPU、内存、磁盘、网络速率、进程数、运行时长。
 - `token`：Agent 上报校验令牌（可选）
 - `webhook_url`：告警 Webhook（可选）
 
+## 设备存储与导入导出
+- 所有设备与历史数据保存在服务端目录的 **`data/monitor.db`**（SQLite 单文件数据库），不是普通文本文档：
+  - 无代理探测设备 → `targets` / `checks` 表；Agent 主机 → `hosts` 表；历史指标 → `history` 表；告警 → `alerts` 表。
+  - 备份/迁移直接复制 `data/monitor.db` 即可（建议先停止服务）。
+- **批量导入/导出**：在「探测配置」页工具栏提供 `导入` / `导出` 按钮：
+  - 导出：JSON（完整备份，含探测参数）或 CSV（可用 Excel 编辑）。
+  - 导入：支持上述 JSON 或 CSV；导入为**新增**，不覆盖现有设备。CSV 表头可点「下载 CSV 模板」获取。
+  - CSV 列：`name,type,address,interval_sec,enabled,ping,tcp_port,http_url,snmp_community,snmp_version,snmp_ifindex,snmp_cpu_oid,db_type,db_port,db_user,db_password,db_name,note`。
+- **按类型筛选**：「探测配置」与「主机管理」页工具栏均有类型下拉框，可按 摄像机/交换机/防火墙/控制器/Linux/Windows/数据库/网络链路/应用/Agent主机 筛选。
+
 ## 目录结构
 ```
 server.js        服务端（Web + API + 探测调度）

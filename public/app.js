@@ -5,6 +5,7 @@ const main = $('#main');
 const state = {
   view: 'dashboard', hostId: null, item: 'cpu.util', range: 3600,
   alertsMode: 'active', triggers: [], hosts: [], catalog: null, modalOpen: false,
+  probeType: '', hostType: '',
 };
 
 const DEVICE_TYPE_NAMES = { camera: '摄像机', switch: '交换机', firewall: '防火墙', controller: '设备控制器', linux: 'Linux服务器', windows: 'Windows电脑', db: '数据库服务器', network: '网络链路', app: '应用服务', other: '其他' };
@@ -96,6 +97,158 @@ function sevBadge(sev) {
   return `<span class="sev ${esc(sev || 'critical')}">${esc(names[sev] || sev || '严重')}</span>`;
 }
 
+/* ---------- 筛选 / 导入导出 ---------- */
+
+function typeFilterOptions(present, current, includeAgent) {
+  const opts = ['<option value="">全部类型</option>'];
+  if (includeAgent && present.has('agent')) opts.push(`<option value="agent" ${current === 'agent' ? 'selected' : ''}>Agent主机</option>`);
+  for (const [k, v] of Object.entries(DEVICE_TYPE_NAMES)) if (present.has(k)) opts.push(`<option value="${k}" ${current === k ? 'selected' : ''}>${v}</option>`);
+  return opts.join('');
+}
+
+function download(filename, text, mime) {
+  const blob = new Blob([text], { type: mime || 'application/octet-stream' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function stripTarget(t) {
+  return {
+    name: t.name, type: t.type, address: t.address, interval_sec: t.interval_sec,
+    enabled: !!t.enabled, note: t.note || '',
+    checks: (t.checks || []).map(c => ({ kind: c.kind, params: c.params || {}, enabled: c.enabled !== false })),
+  };
+}
+
+const CSV_COLS = ['name', 'type', 'address', 'interval_sec', 'enabled', 'ping', 'tcp_port', 'http_url', 'snmp_community', 'snmp_version', 'snmp_ifindex', 'snmp_cpu_oid', 'db_type', 'db_port', 'db_user', 'db_password', 'db_name', 'note'];
+
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function targetsToCSV(targets) {
+  const lines = [CSV_COLS.join(',')];
+  for (const t of targets) {
+    const c = k => (t.checks || []).find(x => x.kind === k) || null;
+    const p = k => (c(k) || {}).params || {};
+    const row = {
+      name: t.name, type: t.type, address: t.address, interval_sec: t.interval_sec, enabled: t.enabled ? 1 : 0,
+      ping: c('ping') ? 1 : 0, tcp_port: p('tcp').port ?? '', http_url: p('http').url || '',
+      snmp_community: c('snmp') ? (p('snmp').community || 'public') : '', snmp_version: p('snmp').version || '2c',
+      snmp_ifindex: p('snmp').ifIndex ?? '', snmp_cpu_oid: p('snmp').cpuOid || '',
+      db_type: p('db').dbtype || '', db_port: p('db').port ?? '', db_user: p('db').user || '',
+      db_password: p('db').password || '', db_name: p('db').db || '', note: t.note || '',
+    };
+    lines.push(CSV_COLS.map(k => csvEscape(row[k])).join(','));
+  }
+  return lines.join('\r\n');
+}
+
+function parseCSV(text) {
+  const rows = []; let row = [], field = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += ch;
+    } else if (ch === '"') inQ = true;
+    else if (ch === ',') { row.push(field); field = ''; }
+    else if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else if (ch !== '\r') field += ch;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.some(c => String(c).trim() !== ''));
+}
+
+function truthy(v) { return /^(1|true|yes|y|on|是)$/i.test(String(v ?? '').trim()); }
+
+function csvToTargets(rows) {
+  if (!rows.length) return [];
+  const header = rows[0].map(h => String(h).trim().toLowerCase());
+  const idx = {}; CSV_COLS.forEach(c => { idx[c] = header.indexOf(c); });
+  const get = (r, c) => idx[c] >= 0 ? String(r[idx[c]] ?? '').trim() : '';
+  const out = [];
+  for (const r of rows.slice(1)) {
+    const name = get(r, 'name'), address = get(r, 'address');
+    if (!name || !address) continue;
+    const checks = [];
+    if (truthy(get(r, 'ping'))) checks.push({ kind: 'ping', params: {} });
+    if (get(r, 'tcp_port')) checks.push({ kind: 'tcp', params: { port: Number(get(r, 'tcp_port')) || 80 } });
+    if (get(r, 'http_url')) checks.push({ kind: 'http', params: { url: get(r, 'http_url') } });
+    if (get(r, 'snmp_community') || get(r, 'snmp_ifindex')) checks.push({ kind: 'snmp', params: { community: get(r, 'snmp_community') || 'public', version: get(r, 'snmp_version') || '2c', ifIndex: get(r, 'snmp_ifindex') ? Number(get(r, 'snmp_ifindex')) : null, cpuOid: get(r, 'snmp_cpu_oid') } });
+    if (get(r, 'db_type')) checks.push({ kind: 'db', params: { dbtype: get(r, 'db_type'), port: get(r, 'db_port') ? Number(get(r, 'db_port')) : undefined, user: get(r, 'db_user'), password: get(r, 'db_password'), db: get(r, 'db_name') } });
+    if (!checks.length) checks.push({ kind: 'ping', params: {} });
+    out.push({ name, type: get(r, 'type') || 'other', address, interval_sec: Number(get(r, 'interval_sec')) || 60, enabled: get(r, 'enabled') === '' ? true : truthy(get(r, 'enabled')), note: get(r, 'note'), checks });
+  }
+  return out;
+}
+
+function normalizeImport(data) {
+  const arr = Array.isArray(data) ? data : (Array.isArray(data.targets) ? data.targets : null);
+  if (!arr) throw new Error('JSON 需为数组或 {targets:[...]}');
+  const out = [];
+  for (const t of arr) {
+    if (!t || !t.name || !t.address) continue;
+    const checks = Array.isArray(t.checks) && t.checks.length
+      ? t.checks.filter(c => c && c.kind).map(c => ({ kind: c.kind, params: c.params || {}, enabled: c.enabled !== false }))
+      : [{ kind: 'ping', params: {} }];
+    out.push({ name: String(t.name), type: t.type || 'other', address: String(t.address), interval_sec: Number(t.interval_sec) || 60, enabled: t.enabled !== false, note: t.note || '', checks });
+  }
+  return out;
+}
+
+function exportModal(targets) {
+  openModal(`<h3>导出监控目标</h3>
+    <div class="hint">共 ${targets.length} 个目标。JSON 适合备份/迁移; CSV 可用 Excel 编辑后再导入。</div>
+    <div class="form-actions"><button class="btn ghost" id="exJson">导出 JSON</button><button class="btn ghost" id="exCsv">导出 CSV</button><button class="btn" id="exClose">关闭</button></div>`);
+  $('#exClose').onclick = closeModal;
+  $('#exJson').onclick = () => { download('winmon-targets.json', JSON.stringify(targets.map(stripTarget), null, 2), 'application/json'); toast('已导出 JSON'); };
+  $('#exCsv').onclick = () => { download('winmon-targets.csv', '\ufeff' + targetsToCSV(targets), 'text/csv'); toast('已导出 CSV'); };
+}
+
+function importModal() {
+  openModal(`<h3>导入监控目标</h3>
+    <div class="hint">支持 JSON(导出格式) 或 CSV(表头见模板)。导入为新增, 不会覆盖现有目标。</div>
+    <div class="form-row"><label>选择文件 (.json / .csv)</label><input type="file" id="impFile" accept=".json,.csv,text/csv,application/json"></div>
+    <div class="hint"><a href="#" id="impTpl">下载 CSV 模板</a></div>
+    <div id="impPreview" class="hint"></div>
+    <div class="form-actions"><button class="btn ghost" id="impCancel">取消</button><button class="btn" id="impOk" disabled>确认导入</button></div>`);
+  let parsed = [];
+  $('#impCancel').onclick = closeModal;
+  $('#impTpl').onclick = e => { e.preventDefault(); download('winmon-targets-template.csv', '\ufeff' + targetsToCSV([]), 'text/csv'); };
+  $('#impFile').onchange = async e => {
+    const f = e.target.files[0]; parsed = []; $('#impOk').disabled = true; $('#impPreview').textContent = '';
+    if (!f) return;
+    try {
+      const text = await f.text();
+      const trimmed = text.replace(/^\ufeff/, '').trim();
+      if (/\.json$/i.test(f.name) || trimmed.startsWith('[') || trimmed.startsWith('{')) parsed = normalizeImport(JSON.parse(trimmed));
+      else parsed = csvToTargets(parseCSV(trimmed));
+      $('#impPreview').textContent = parsed.length ? `解析到 ${parsed.length} 个有效目标` : '未解析到有效目标(需 name 与 address)';
+      $('#impOk').disabled = !parsed.length;
+    } catch (err) { $('#impPreview').textContent = '解析失败: ' + err.message; }
+  };
+  $('#impOk').onclick = async () => {
+    $('#impOk').disabled = true;
+    let ok = 0, fail = 0; const errs = [];
+    for (const t of parsed) {
+      try { await api('/api/targets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(t) }); ok++; }
+      catch (e) { fail++; errs.push(t.name + ': ' + e.message); }
+    }
+    closeModal();
+    toast(`导入完成: 成功 ${ok}, 失败 ${fail}`, fail > 0);
+    if (errs.length) {
+      openModal(`<h3>导入失败明细</h3><div class="code">${esc(errs.join('\n'))}</div><div class="form-actions"><button class="btn" id="ieClose">关闭</button></div>`);
+      $('#ieClose').onclick = closeModal;
+    }
+    renderProbes();
+  };
+}
+
 /* ---------- 视图渲染 ---------- */
 
 async function render() {
@@ -169,15 +322,20 @@ async function renderProbes() {
   catch (e) { main.innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`; return; }
   const hmap = {};
   for (const h of hosts) hmap[h.host_key] = h;
+  const present = new Set(targets.map(t => t.type));
+  const filtered = state.probeType ? targets.filter(t => t.type === state.probeType) : targets;
   main.innerHTML = `
     <div class="toolbar">
       <button class="btn" id="addTarget">+ 新建监控目标</button>
+      <button class="btn ghost" id="impTargets">导入</button>
+      <button class="btn ghost" id="expTargets">导出</button>
+      <select id="probeTypeFilter" style="width:auto">${typeFilterOptions(present, state.probeType, false)}</select>
       <div class="spacer"></div>
-      <span class="hint">支持 摄像机/交换机/防火墙/控制器/Linux/数据库/网络链路/应用, 无需安装Agent</span>
+      <span class="hint">共 ${targets.length} 个目标${state.probeType ? `, 筛选出 ${filtered.length} 个` : ''} · 无需安装Agent</span>
     </div>
     <div class="panel" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>名称</th><th>类型</th><th>地址</th><th>探测方式</th><th>间隔</th><th>状态</th><th>最近错误</th><th>启用</th><th>操作</th></tr></thead>
-      <tbody>${targets.map(t => {
+      <tbody>${filtered.map(t => {
         const h = hmap['probe:' + t.id];
         const st = h ? probeStatus(h) : { ok: true };
         return `<tr>
@@ -195,9 +353,12 @@ async function renderProbes() {
             <button class="btn danger sm" data-del="${t.id}">删除</button>
           </td>
         </tr>`;
-      }).join('') || '<tr><td colspan="9" class="empty">暂无监控目标, 点击"新建监控目标"添加</td></tr>'}</tbody></table>
+      }).join('') || `<tr><td colspan="9" class="empty">${state.probeType ? '该类型下暂无监控目标' : '暂无监控目标, 点击"新建监控目标"添加'}</td></tr>`}</tbody></table>
     </div>`;
   $('#addTarget').onclick = () => probeForm(null);
+  $('#impTargets').onclick = () => importModal();
+  $('#expTargets').onclick = () => exportModal(targets);
+  $('#probeTypeFilter').onchange = e => { state.probeType = e.target.value; renderProbes(); };
   main.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => probeForm(targets.find(t => t.id === Number(b.dataset.edit))));
   main.querySelectorAll('[data-test]').forEach(b => b.onclick = async () => {
     const id = Number(b.dataset.test);
@@ -613,10 +774,19 @@ async function renderHosts() {
   const tmap = {};
   for (const t of targets) tmap['probe:' + t.id] = t;
   const origin = location.origin;
+  const present = new Set(hosts.map(h => h.kind === 'probe' ? h.dtype : 'agent'));
+  const filtered = state.hostType
+    ? hosts.filter(h => state.hostType === 'agent' ? h.kind !== 'probe' : (h.kind === 'probe' && h.dtype === state.hostType))
+    : hosts;
   main.innerHTML = `
+    <div class="toolbar">
+      <select id="hostTypeFilter" style="width:auto">${typeFilterOptions(present, state.hostType, true)}</select>
+      <div class="spacer"></div>
+      <span class="hint">共 ${hosts.length} 台主机${state.hostType ? `, 筛选出 ${filtered.length} 台` : ''}</span>
+    </div>
     <div class="panel" style="padding:0;overflow-x:auto">
       <table><thead><tr><th>名称</th><th>类型</th><th>主机标识</th><th>IP</th><th>系统/设备</th><th>最后上报</th><th>状态</th><th>告警</th><th>操作</th></tr></thead>
-      <tbody>${hosts.map(h => `<tr>
+      <tbody>${filtered.map(h => `<tr>
         <td><b>${esc(h.name)}</b></td>
         <td>${h.kind === 'probe' ? esc(DEVICE_TYPE_NAMES[h.dtype] || '设备') : 'Agent主机'}</td>
         <td>${esc(h.host_key)}</td>
@@ -630,7 +800,7 @@ async function renderHosts() {
           ${h.kind === 'probe' ? `<button class="btn ghost sm" data-cfg="${h.id}">配置</button>` : `<button class="btn ghost sm" data-rename="${h.id}">重命名</button>`}
           <button class="btn danger sm" data-del="${h.id}">删除</button>
         </td>
-      </tr>`).join('') || '<tr><td colspan="9" class="empty">暂无主机</td></tr>'}</tbody></table>
+      </tr>`).join('') || `<tr><td colspan="9" class="empty">${state.hostType ? '该类型下暂无主机' : '暂无主机'}</td></tr>`}</tbody></table>
     </div>
     <div class="panel">
       <h2>接入新主机 (Agent 部署)</h2>
@@ -643,6 +813,7 @@ async function renderHosts() {
         注: 若服务端 config.json 中设置了 token, Agent 端需填写相同的 token。
       </div>
     </div>`;
+  $('#hostTypeFilter').onchange = e => { state.hostType = e.target.value; renderHosts(); };
   main.querySelectorAll('[data-detail]').forEach(b => b.onclick = () => openHost(Number(b.dataset.detail)));
   main.querySelectorAll('[data-cfg]').forEach(b => b.onclick = () => {
     const h = hosts.find(x => x.id === Number(b.dataset.cfg));
