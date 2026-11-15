@@ -6,6 +6,7 @@ const state = {
   view: 'dashboard', hostId: null, item: 'cpu.util', range: 3600,
   alertsMode: 'active', triggers: [], hosts: [], catalog: null, modalOpen: false,
   probeType: '', hostType: '',
+  selProbes: new Set(), selHosts: new Set(),
 };
 
 const DEVICE_TYPE_NAMES = { camera: '摄像机', switch: '交换机', firewall: '防火墙', controller: '设备控制器', linux: 'Linux服务器', windows: 'Windows电脑', db: '数据库服务器', network: '网络链路', app: '应用服务', other: '其他' };
@@ -137,6 +138,15 @@ function stripTarget(t) {
   };
 }
 
+async function decodeText(file) {
+  const buf = await file.arrayBuffer();
+  const b = new Uint8Array(buf);
+  if (b[0] === 0xFF && b[1] === 0xFE) return new TextDecoder('utf-16le').decode(buf);
+  if (b[0] === 0xFE && b[1] === 0xFF) return new TextDecoder('utf-16be').decode(buf);
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch { return new TextDecoder('gbk').decode(buf); }
+}
+
 const CSV_COLS = ['name', 'type', 'address', 'interval_sec', 'enabled', 'ping', 'tcp_port', 'http_url', 'snmp_community', 'snmp_version', 'snmp_ifindex', 'snmp_cpu_oid', 'db_type', 'db_port', 'db_user', 'db_password', 'db_name', 'note'];
 
 function csvEscape(v) {
@@ -238,7 +248,7 @@ function importModal() {
     const f = e.target.files[0]; parsed = []; $('#impOk').disabled = true; $('#impPreview').textContent = '';
     if (!f) return;
     try {
-      const text = await f.text();
+      const text = await decodeText(f);
       const trimmed = text.replace(/^\ufeff/, '').trim();
       if (/\.json$/i.test(f.name) || trimmed.startsWith('[') || trimmed.startsWith('{')) parsed = normalizeImport(JSON.parse(trimmed));
       else parsed = csvToTargets(parseCSV(trimmed));
@@ -338,6 +348,7 @@ async function renderProbes() {
   for (const h of hosts) hmap[h.host_key] = h;
   const present = new Set(targets.map(t => t.type));
   const filtered = state.probeType ? targets.filter(t => t.type === state.probeType) : targets;
+  state.selProbes = new Set([...state.selProbes].filter(id => targets.some(t => t.id === id)));
   main.innerHTML = `
     <div class="toolbar">
       <button class="btn" id="addTarget">+ 新建监控目标</button>
@@ -347,12 +358,19 @@ async function renderProbes() {
       <div class="spacer"></div>
       <span class="hint">共 ${targets.length} 个目标${state.probeType ? `, 筛选出 ${filtered.length} 个` : ''} · 无需安装Agent</span>
     </div>
+    <div class="toolbar" id="probeBulk" style="display:none">
+      <span class="hint">已选 <b id="probeSelCount">0</b> 项</span>
+      <button class="btn ghost sm" id="bulkEditProbes">批量修改</button>
+      <button class="btn danger sm" id="bulkDelProbes">批量删除</button>
+      <button class="btn ghost sm" id="bulkClearProbes">清除选择</button>
+    </div>
     <div class="panel" style="padding:0;overflow-x:auto">
-      <table><thead><tr><th>名称</th><th>类型</th><th>地址</th><th>探测方式</th><th>间隔</th><th>状态</th><th>最近错误</th><th>启用</th><th>操作</th></tr></thead>
+      <table><thead><tr><th style="width:34px"><input type="checkbox" id="selAllProbes" title="全选"></th><th>名称</th><th>类型</th><th>地址</th><th>探测方式</th><th>间隔</th><th>状态</th><th>最近错误</th><th>启用</th><th>操作</th></tr></thead>
       <tbody>${filtered.map(t => {
         const h = hmap['probe:' + t.id];
         const st = h ? probeStatus(h) : { ok: true };
         return `<tr>
+          <td><input type="checkbox" class="row-sel" data-sel="${t.id}" ${state.selProbes.has(t.id) ? 'checked' : ''}></td>
           <td><b>${esc(t.name)}</b></td>
           <td>${esc(DEVICE_TYPE_NAMES[t.type] || t.type)}</td>
           <td>${esc(t.address)}</td>
@@ -367,8 +385,37 @@ async function renderProbes() {
             <button class="btn danger sm" data-del="${t.id}">删除</button>
           </td>
         </tr>`;
-      }).join('') || `<tr><td colspan="9" class="empty">${state.probeType ? '该类型下暂无监控目标' : '暂无监控目标, 点击"新建监控目标"添加'}</td></tr>`}</tbody></table>
+      }).join('') || `<tr><td colspan="10" class="empty">${state.probeType ? '该类型下暂无监控目标' : '暂无监控目标, 点击"新建监控目标"添加'}</td></tr>`}</tbody></table>
     </div>`;
+  const updateProbeBulk = () => {
+    const n = state.selProbes.size;
+    $('#probeBulk').style.display = n ? 'flex' : 'none';
+    $('#probeSelCount').textContent = n;
+    const all = $('#selAllProbes');
+    const selInView = filtered.filter(t => state.selProbes.has(t.id)).length;
+    all.checked = filtered.length > 0 && selInView === filtered.length;
+    all.indeterminate = selInView > 0 && selInView < filtered.length;
+  };
+  updateProbeBulk();
+  $('#selAllProbes').onchange = e => {
+    for (const t of filtered) e.target.checked ? state.selProbes.add(t.id) : state.selProbes.delete(t.id);
+    renderProbes();
+  };
+  main.querySelectorAll('.row-sel').forEach(cb => cb.onchange = () => {
+    const id = Number(cb.dataset.sel);
+    cb.checked ? state.selProbes.add(id) : state.selProbes.delete(id);
+    updateProbeBulk();
+  });
+  $('#bulkClearProbes').onclick = () => { state.selProbes.clear(); renderProbes(); };
+  $('#bulkDelProbes').onclick = () => {
+    const ids = [...state.selProbes];
+    confirmModal(`删除所选 ${ids.length} 个监控目标?`, '其历史数据与告警将一并删除。', async () => {
+      for (const id of ids) await api('/api/targets?id=' + id, { method: 'DELETE' });
+      state.selProbes.clear();
+      toast(`已删除 ${ids.length} 个目标`); renderProbes();
+    });
+  };
+  $('#bulkEditProbes').onclick = () => bulkEditProbes(targets);
   $('#addTarget').onclick = () => probeForm(null);
   $('#impTargets').onclick = () => importModal();
   $('#expTargets').onclick = () => exportModal(targets);
@@ -398,6 +445,40 @@ async function renderProbes() {
       toast(sw.checked ? '已启用' : '已停用');
     } catch (e) { toast(e.message, true); sw.checked = !sw.checked; }
   });
+}
+
+function bulkEditProbes(targets) {
+  const ids = [...state.selProbes];
+  const sel = targets.filter(t => state.selProbes.has(t.id));
+  openModal(`
+    <h3>批量修改 (${ids.length} 个目标)</h3>
+    <div class="hint">留空 / 选择"保持不变"的项不会被修改。</div>
+    <div class="form-row"><label>启用状态</label><select id="beEnabled">
+      <option value="">保持不变</option><option value="1">启用</option><option value="0">停用</option>
+    </select></div>
+    <div class="form-row"><label>探测间隔(秒)</label><input type="number" id="beInterval" min="10" max="3600" placeholder="保持不变"></div>
+    <div class="form-row"><label>设备类型</label><select id="beType">
+      <option value="">保持不变</option>${Object.entries(DEVICE_TYPE_NAMES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}
+    </select></div>
+    <div class="form-actions"><button class="btn ghost" id="beCancel">取消</button><button class="btn" id="beOk">应用到 ${ids.length} 个目标</button></div>`);
+  $('#beCancel').onclick = closeModal;
+  $('#beOk').onclick = async () => {
+    const changes = {};
+    if ($('#beEnabled').value !== '') changes.enabled = $('#beEnabled').value === '1';
+    const iv = Number($('#beInterval').value);
+    if ($('#beInterval').value.trim() && isFinite(iv)) changes.interval_sec = Math.max(10, Math.min(3600, Math.floor(iv)));
+    if ($('#beType').value) changes.type = $('#beType').value;
+    if (!Object.keys(changes).length) return toast('未选择任何修改项', true);
+    let fail = 0;
+    for (const t of sel) {
+      try {
+        await api('/api/targets?id=' + t.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...t, ...changes }) });
+      } catch { fail++; }
+    }
+    closeModal();
+    toast(fail ? `已修改 ${sel.length - fail} 个, ${fail} 个失败` : `已修改 ${sel.length} 个目标`, !!fail);
+    renderProbes();
+  };
 }
 
 function probeForm(t) {
@@ -794,15 +875,23 @@ async function renderHosts() {
   const filtered = state.hostType
     ? hosts.filter(h => state.hostType === 'agent' ? h.kind !== 'probe' : (h.kind === 'probe' && h.dtype === state.hostType))
     : hosts;
+  state.selHosts = new Set([...state.selHosts].filter(id => hosts.some(h => h.id === id)));
   main.innerHTML = `
     <div class="toolbar">
       <select id="hostTypeFilter" style="width:auto">${typeFilterOptions(present, state.hostType, true)}</select>
       <div class="spacer"></div>
       <span class="hint">共 ${hosts.length} 台主机${state.hostType ? `, 筛选出 ${filtered.length} 台` : ''}</span>
     </div>
+    <div class="toolbar" id="hostBulk" style="display:none">
+      <span class="hint">已选 <b id="hostSelCount">0</b> 台</span>
+      <button class="btn ghost sm" id="bulkEditHosts">批量修改</button>
+      <button class="btn danger sm" id="bulkDelHosts">批量删除</button>
+      <button class="btn ghost sm" id="bulkClearHosts">清除选择</button>
+    </div>
     <div class="panel" style="padding:0;overflow-x:auto">
-      <table><thead><tr><th>名称</th><th>类型</th><th>主机标识</th><th>IP</th><th>系统/设备</th><th>最后上报</th><th>状态</th><th>告警</th><th>操作</th></tr></thead>
+      <table><thead><tr><th style="width:34px"><input type="checkbox" id="selAllHosts" title="全选"></th><th>名称</th><th>类型</th><th>主机标识</th><th>IP</th><th>系统/设备</th><th>最后上报</th><th>状态</th><th>告警</th><th>操作</th></tr></thead>
       <tbody>${filtered.map(h => `<tr>
+        <td><input type="checkbox" class="row-sel" data-sel="${h.id}" ${state.selHosts.has(h.id) ? 'checked' : ''}></td>
         <td><b>${esc(h.name)}</b></td>
         <td>${h.kind === 'probe' ? esc(DEVICE_TYPE_NAMES[h.dtype] || '设备') : 'Agent主机'}</td>
         <td>${esc(h.host_key)}</td>
@@ -816,7 +905,7 @@ async function renderHosts() {
           ${h.kind === 'probe' ? `<button class="btn ghost sm" data-cfg="${h.id}">配置</button>` : `<button class="btn ghost sm" data-rename="${h.id}">重命名</button>`}
           <button class="btn danger sm" data-del="${h.id}">删除</button>
         </td>
-      </tr>`).join('') || `<tr><td colspan="9" class="empty">${state.hostType ? '该类型下暂无主机' : '暂无主机'}</td></tr>`}</tbody></table>
+      </tr>`).join('') || `<tr><td colspan="10" class="empty">${state.hostType ? '该类型下暂无主机' : '暂无主机'}</td></tr>`}</tbody></table>
     </div>
     <div class="panel">
       <h2>接入新主机 (Agent 部署)</h2>
@@ -829,6 +918,35 @@ async function renderHosts() {
         注: 若服务端 config.json 中设置了 token, Agent 端需填写相同的 token。
       </div>
     </div>`;
+  const updateHostBulk = () => {
+    const n = state.selHosts.size;
+    $('#hostBulk').style.display = n ? 'flex' : 'none';
+    $('#hostSelCount').textContent = n;
+    const all = $('#selAllHosts');
+    const selInView = filtered.filter(h => state.selHosts.has(h.id)).length;
+    all.checked = filtered.length > 0 && selInView === filtered.length;
+    all.indeterminate = selInView > 0 && selInView < filtered.length;
+  };
+  updateHostBulk();
+  $('#selAllHosts').onchange = e => {
+    for (const h of filtered) e.target.checked ? state.selHosts.add(h.id) : state.selHosts.delete(h.id);
+    renderHosts();
+  };
+  main.querySelectorAll('.row-sel').forEach(cb => cb.onchange = () => {
+    const id = Number(cb.dataset.sel);
+    cb.checked ? state.selHosts.add(id) : state.selHosts.delete(id);
+    updateHostBulk();
+  });
+  $('#bulkClearHosts').onclick = () => { state.selHosts.clear(); renderHosts(); };
+  $('#bulkDelHosts').onclick = () => {
+    const ids = [...state.selHosts];
+    confirmModal(`删除所选 ${ids.length} 台主机?`, '其历史数据与告警将一并删除。探测设备会同时删除其探测配置(不再自动恢复); Agent 主机再次上报时会重新注册。', async () => {
+      for (const id of ids) await api('/api/host?id=' + id, { method: 'DELETE' });
+      state.selHosts.clear();
+      toast(`已删除 ${ids.length} 台主机`); renderHosts();
+    });
+  };
+  $('#bulkEditHosts').onclick = () => bulkEditHosts(hosts, targets);
   $('#hostTypeFilter').onchange = e => { state.hostType = e.target.value; renderHosts(); };
   main.querySelectorAll('[data-detail]').forEach(b => b.onclick = () => openHost(Number(b.dataset.detail)));
   main.querySelectorAll('[data-cfg]').forEach(b => b.onclick = () => {
@@ -859,6 +977,51 @@ async function renderHosts() {
       renderHosts();
     });
   });
+}
+
+function bulkEditHosts(hosts, targets) {
+  const sel = hosts.filter(h => state.selHosts.has(h.id));
+  const probeSel = sel.filter(h => h.kind === 'probe');
+  const tmap = {};
+  for (const t of targets) tmap['probe:' + t.id] = t;
+  openModal(`
+    <h3>批量修改 (${sel.length} 台主机)</h3>
+    <div class="hint">留空的项不会被修改; 名称替换只影响包含"查找内容"的主机。</div>
+    <div class="form-row inline">
+      <div><label>名称查找</label><input type="text" id="bhFind" placeholder="如: 摄像机"></div>
+      <div><label>替换为</label><input type="text" id="bhRepl" placeholder="如: 摄像头"></div>
+    </div>
+    ${probeSel.length ? `<div class="form-row"><label>探测启用状态 (仅 ${probeSel.length} 台探测设备)</label><select id="bhEnabled">
+      <option value="">保持不变</option><option value="1">启用</option><option value="0">停用</option>
+    </select></div>` : ''}
+    <div class="form-actions"><button class="btn ghost" id="bhCancel">取消</button><button class="btn" id="bhOk">应用</button></div>`);
+  $('#bhCancel').onclick = closeModal;
+  $('#bhOk').onclick = async () => {
+    const find = $('#bhFind').value;
+    const repl = $('#bhRepl').value;
+    const en = $('#bhEnabled') ? $('#bhEnabled').value : '';
+    if (!find && en === '') return toast('未选择任何修改项', true);
+    let ok = 0, fail = 0;
+    for (const h of sel) {
+      if (find && h.name.includes(find)) {
+        try {
+          await api('/api/host?id=' + h.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: h.name.replaceAll(find, repl) }) });
+          ok++;
+        } catch { fail++; }
+      }
+      if (en !== '' && h.kind === 'probe') {
+        const t = tmap[h.host_key];
+        if (!t) continue;
+        try {
+          await api('/api/targets?id=' + t.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...t, enabled: en === '1' }) });
+          ok++;
+        } catch { fail++; }
+      }
+    }
+    closeModal();
+    toast(fail ? `已修改 ${ok} 项, ${fail} 项失败` : `已修改 ${ok} 项`, !!fail);
+    renderHosts();
+  };
 }
 
 /* ---------- 弹窗 ---------- */
