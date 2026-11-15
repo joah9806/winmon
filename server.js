@@ -8,7 +8,7 @@ const alert = require('./lib/alert');
 const probe = require('./lib/probe');
 
 const ROOT = __dirname;
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const CONFIG_FILE = path.join(ROOT, 'config.json');
 const DATA_DIR = path.join(ROOT, 'data');
 const PUBLIC_DIR = path.join(ROOT, 'public');
