@@ -11,6 +11,20 @@ const state = {
 const DEVICE_TYPE_NAMES = { camera: '摄像机', switch: '交换机', firewall: '防火墙', controller: '设备控制器', linux: 'Linux服务器', windows: 'Windows电脑', db: '数据库服务器', network: '网络链路', app: '应用服务', other: '其他' };
 const CHECK_NAMES = { ping: 'Ping', tcp: '端口', http: 'HTTP', snmp: 'SNMP', db: '数据库' };
 
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function accentAlpha(a) {
+  const h = cssVar('--accent').replace('#', '');
+  const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  const b = $('#themeToggle');
+  if (b) b.textContent = t === 'light' ? '深色' : '浅色';
+}
+applyTheme(localStorage.getItem('winmon-theme') || 'dark');
+let serverStopped = false;
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -523,7 +537,7 @@ function drawChart(canvas, points, item) {
   const meta = itemMeta(item);
 
   if (!points.length) {
-    ctx.fillStyle = '#8493b8';
+    ctx.fillStyle = cssVar('--muted');
     ctx.font = '13px system-ui';
     ctx.textAlign = 'center';
     ctx.fillText('暂无数据', W / 2, H / 2);
@@ -549,9 +563,9 @@ function drawChart(canvas, points, item) {
   for (let i = 0; i <= 4; i++) {
     const v = ymin + (ymax - ymin) * i / 4;
     const yy = y(v);
-    ctx.strokeStyle = '#26314f';
+    ctx.strokeStyle = cssVar('--border');
     ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke();
-    ctx.fillStyle = '#8493b8';
+    ctx.fillStyle = cssVar('--muted');
     ctx.fillText(compactVal(v, meta.unit), pad.l - 8, yy);
   }
   ctx.textAlign = 'center';
@@ -563,16 +577,16 @@ function drawChart(canvas, points, item) {
     const lab = state.range > 86400
       ? `${d.getMonth() + 1}-${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
       : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    ctx.fillStyle = '#8493b8';
+    ctx.fillStyle = cssVar('--muted');
     ctx.fillText(lab, x(ts), H - pad.b + 8);
   }
 
   const grad = ctx.createLinearGradient(0, pad.t, 0, H - pad.b);
-  grad.addColorStop(0, 'rgba(79,140,255,.35)');
-  grad.addColorStop(1, 'rgba(79,140,255,.02)');
+  grad.addColorStop(0, accentAlpha(.35));
+  grad.addColorStop(1, accentAlpha(.02));
   ctx.beginPath();
   points.forEach((p, i) => i ? ctx.lineTo(x(p.ts), y(p.value)) : ctx.moveTo(x(p.ts), y(p.value)));
-  ctx.strokeStyle = '#4f8cff';
+  ctx.strokeStyle = cssVar('--accent');
   ctx.lineWidth = 1.8;
   ctx.stroke();
   ctx.lineTo(x(points[points.length - 1].ts), H - pad.b);
@@ -584,7 +598,7 @@ function drawChart(canvas, points, item) {
   const last = points[points.length - 1];
   ctx.beginPath();
   ctx.arc(x(last.ts), y(last.value), 3, 0, Math.PI * 2);
-  ctx.fillStyle = '#4f8cff';
+  ctx.fillStyle = cssVar('--accent');
   ctx.fill();
 
   canvas._chart = { points, item, x, y, pad, W, H, t0, t1 };
@@ -616,12 +630,14 @@ document.addEventListener('mousemove', e => {
   const dpr = window.devicePixelRatio || 1;
   ctx.save();
   ctx.scale(dpr, dpr);
-  ctx.strokeStyle = 'rgba(217,225,245,.3)';
+  ctx.strokeStyle = cssVar('--muted');
+  ctx.globalAlpha = .35;
   ctx.setLineDash([4, 4]);
   ctx.beginPath(); ctx.moveTo(c.x(best.ts), c.pad.t); ctx.lineTo(c.x(best.ts), c.H - c.pad.b); ctx.stroke();
   ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
   ctx.beginPath(); ctx.arc(c.x(best.ts), c.y(best.value), 4, 0, Math.PI * 2);
-  ctx.fillStyle = '#fff'; ctx.fill();
+  ctx.fillStyle = cssVar('--strong'); ctx.fill();
   ctx.restore();
   tip.innerHTML = `<div>${fmtTime(best.ts)}</div><b>${fmtVal(c.item, best.value)}</b>`;
   tip.style.display = 'block';
@@ -884,7 +900,24 @@ document.querySelectorAll('#nav button').forEach(b => b.onclick = () => {
   render();
 });
 
+$('#themeToggle').onclick = () => {
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  localStorage.setItem('winmon-theme', next);
+  applyTheme(next);
+  render();
+};
+
+$('#shutdownBtn').onclick = () => {
+  confirmModal('停止监控服务?', '服务进程将退出, 本页面随之不可用。之后可双击 start.bat 重新启动。', async () => {
+    await api('/api/shutdown', { method: 'POST' });
+    serverStopped = true;
+    $('#serverStatus').innerHTML = '<span class="dot" style="background:var(--red)"></span>已停止';
+    toast('服务已停止');
+  });
+};
+
 async function pollStatus() {
+  if (serverStopped) return;
   const el = $('#serverStatus');
   try {
     const s = await api('/api/stats');
@@ -895,7 +928,7 @@ async function pollStatus() {
 }
 
 setInterval(() => {
-  if (state.modalOpen) return;
+  if (serverStopped || state.modalOpen) return;
   if (['dashboard', 'host', 'alerts', 'probes'].includes(state.view)) render();
 }, 10000);
 

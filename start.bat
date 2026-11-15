@@ -1,9 +1,8 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title WinMon Server
-echo Starting WinMon monitoring server (browser opens automatically)...
-echo Close this window or press Ctrl+C to stop.
-echo.
-runtime\node.exe server.js
-pause
+echo Starting WinMon in background (no console window)...
+wscript //b start-hidden.vbs
+echo Server is starting in background. Browser opens automatically.
+echo Web UI: http://127.0.0.1:8686
+echo Stop: stop.bat or the web UI button. Log: data\server.log

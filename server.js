@@ -8,7 +8,7 @@ const alert = require('./lib/alert');
 const probe = require('./lib/probe');
 
 const ROOT = __dirname;
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const CONFIG_FILE = path.join(ROOT, 'config.json');
 const DATA_DIR = path.join(ROOT, 'data');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -125,6 +125,15 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'GET' && p === '/api/health') {
         return json(res, 200, { ok: true, version: VERSION, uptime: Math.floor((Date.now() - startedAt) / 1000) });
+      }
+      if (req.method === 'POST' && p === '/api/shutdown') {
+        const ra = req.socket.remoteAddress || '';
+        if (ra !== '127.0.0.1' && ra !== '::1' && ra !== '::ffff:127.0.0.1') {
+          return json(res, 403, { error: '仅允许本机回环地址关闭服务' });
+        }
+        json(res, 200, { ok: true });
+        setTimeout(shutdown, 300);
+        return;
       }
       if (req.method === 'GET' && p === '/api/hosts') {
         const now = Date.now();
