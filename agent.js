@@ -1,7 +1,8 @@
 'use strict';
-const fs = require('node:fs');
-const path = require('node:path');
+const fs = require('fs');
+const path = require('path');
 const metrics = require('./lib/metrics');
+const httpc = require('./lib/httpc');
 
 const ROOT = __dirname;
 const CONFIG_FILE = path.join(ROOT, 'config.json');
@@ -38,16 +39,13 @@ async function tick() {
   running = true;
   try {
     const m = await metrics.collect(slowMs);
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 10000);
-    const resp = await fetch(pushUrl, {
+    const resp = await httpc.request(pushUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...info, metrics: m, token: cfg.token }),
-      signal: ctrl.signal,
+      timeout: 10000,
     });
-    clearTimeout(timer);
-    if (!resp.ok) throw new Error(`服务端返回 ${resp.status}: ${await resp.text()}`);
+    if (!resp.ok) throw new Error(`服务端返回 ${resp.status}: ${resp.text()}`);
     failures = 0;
     console.log(`[${new Date().toLocaleTimeString('zh-CN')}] 上报成功 CPU=${m['cpu.util']}% 内存=${m['mem.used_pct']}%`);
   } catch (e) {

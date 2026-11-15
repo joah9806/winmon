@@ -412,7 +412,16 @@ async function renderProbes() {
         2. 修改解压目录中 <b>config.json</b> 的 agent.server_url 为服务端地址, 例如:
         <div class="code">"agent": { "server_url": "${esc(origin.replace('127.0.0.1', '服务端局域网IP'))}" }</div>
         3. 双击 <b>agent.bat</b> 启动, 主机将自动注册并开始上报数据 (出现在"概览"中)。<br>
-        注: 若服务端 config.json 中设置了 token, Agent 端需填写相同的 token。
+        注: 若服务端 config.json 中设置了 token, Agent 端需填写相同的 token。<br>
+        注: 部署包内含 64 位与 32 位 Node 12 运行时, 启动脚本自动选择, 支持 Windows 7 SP1 及以上。
+      </div>
+    </div>
+    <div class="panel">
+      <h2>运行环境要求</h2>
+      <div class="hint">
+        服务端 / Agent: Windows 7 SP1、8.1、10、11 或 Linux (自带 Node 12 运行时, 无需另装环境)。<br>
+        浏览器: Chrome 87+ / Edge 87+ / Firefox 78+。Windows 7 上可用 <b>Chrome 109</b> 或 <b>Firefox 115 ESR</b>;
+        IE11 无法运行本界面, 请改用上述浏览器或从局域网内其它设备访问。
       </div>
     </div>`;
   const updateProbeBulk = () => {

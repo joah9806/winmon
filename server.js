@@ -1,16 +1,16 @@
 'use strict';
-const http = require('node:http');
-const fs = require('node:fs');
-const path = require('node:path');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const DB = require('./lib/db');
 const metrics = require('./lib/metrics');
 const alert = require('./lib/alert');
 const probe = require('./lib/probe');
 const mailer = require('./lib/mailer');
-const { spawn } = require('node:child_process');
+const { spawn } = require('child_process');
 
 const ROOT = __dirname;
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const CONFIG_FILE = path.join(ROOT, 'config.json');
 const DATA_DIR = path.join(ROOT, 'data');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -37,9 +37,9 @@ function loadConfig() {
     server: { ...DEFAULT_CONFIG.server, ...cfg.server },
     agent: { ...DEFAULT_CONFIG.agent, ...cfg.agent },
     collection: { ...DEFAULT_CONFIG.collection, ...cfg.collection },
-    retention_days: cfg.retention_days ?? DEFAULT_CONFIG.retention_days,
-    token: cfg.token ?? '',
-    webhook_url: cfg.webhook_url ?? '',
+    retention_days: cfg.retention_days == null ? DEFAULT_CONFIG.retention_days : cfg.retention_days,
+    token: cfg.token == null ? '' : cfg.token,
+    webhook_url: cfg.webhook_url == null ? '' : cfg.webhook_url,
     mail: { ...DEFAULT_CONFIG.mail, ...(cfg.mail || {}) },
   };
 }
@@ -65,6 +65,8 @@ const MIME = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
 };
+
+function orNull(v) { return v == null ? null : v; }
 
 function json(res, code, obj) {
   const body = JSON.stringify(obj);
@@ -132,7 +134,11 @@ const server = http.createServer(async (req, res) => {
         return handlePush(req, res, await readBody(req));
       }
       if (req.method === 'GET' && p === '/api/health') {
-        return json(res, 200, { ok: true, version: VERSION, uptime: Math.floor((Date.now() - startedAt) / 1000) });
+        return json(res, 200, {
+          ok: true, version: VERSION, uptime: Math.floor((Date.now() - startedAt) / 1000),
+          node: process.version,
+          lan_url: 'http://' + metrics.localIp() + ':' + cfg.server.port,
+        });
       }
       if (req.method === 'POST' && p === '/api/shutdown') {
         const ra = req.socket.remoteAddress || '';
@@ -207,13 +213,13 @@ const server = http.createServer(async (req, res) => {
           }
           return {
             ...h, online: hostOnline(h, now), alerts: db.activeAlertCount(h.id),
-            cpu_util: latest['cpu.util'] ?? null, mem_pct: latest['mem.used_pct'] ?? null,
-            disk_max: diskMax, net_in: latest['net.in'] ?? null, net_out: latest['net.out'] ?? null,
-            uptime: latest['sys.uptime'] ?? null,
-            ping_latency: latest['ping.latency'] ?? null, ping_loss: latest['ping.loss'] ?? null,
-            ping_ok: latest['ping.ok'] ?? null, tcp_open: latest['tcp.open'] ?? null,
-            http_ok: latest['http.ok'] ?? null, db_ok: latest['db.ok'] ?? null,
-            snmp_up: latest['snmp.up'] ?? null, snmp_in: latest['snmp.in'] ?? null, snmp_out: latest['snmp.out'] ?? null,
+            cpu_util: orNull(latest['cpu.util']), mem_pct: orNull(latest['mem.used_pct']),
+            disk_max: diskMax, net_in: orNull(latest['net.in']), net_out: orNull(latest['net.out']),
+            uptime: orNull(latest['sys.uptime']),
+            ping_latency: orNull(latest['ping.latency']), ping_loss: orNull(latest['ping.loss']),
+            ping_ok: orNull(latest['ping.ok']), tcp_open: orNull(latest['tcp.open']),
+            http_ok: orNull(latest['http.ok']), db_ok: orNull(latest['db.ok']),
+            snmp_up: orNull(latest['snmp.up']), snmp_in: orNull(latest['snmp.in']), snmp_out: orNull(latest['snmp.out']),
           };
         });
         return json(res, 200, hosts);
@@ -405,7 +411,7 @@ function cleanupTick() {
   try {
     const before = Date.now() - cfg.retention_days * 86400000;
     const n = db.cleanupHistory(before);
-    db.db.prepare("DELETE FROM alerts WHERE status='resolved' AND end_ts < ?").run(Date.now() - 30 * 86400000);
+    db.cleanupAlerts(Date.now() - 30 * 86400000);
     if (n > 0) console.log(`[清理] 删除过期历史数据 ${n} 条`);
   } catch (e) { console.error('[清理失败]', e.message); }
 }
@@ -452,7 +458,7 @@ function startListen() {
     console.log('  按 Ctrl+C 停止服务');
     console.log('======================================================');
     if (!isRestartChild && process.platform === 'win32' && cfg.server.open_browser !== false) {
-      require('node:child_process').exec(`start "" "http://127.0.0.1:${cfg.server.port}"`);
+      require('child_process').exec(`start "" "http://127.0.0.1:${cfg.server.port}"`);
     }
     setTimeout(localTick, 1500);
     setInterval(localTick, cfg.collection.interval_sec * 1000);
@@ -495,23 +501,29 @@ function shutdown() {
 
 function restart() {
   console.log('\n正在重启服务...');
-  let logFd = 'ignore';
-  try { logFd = fs.openSync(path.join(DATA_DIR, 'server.log'), 'a'); } catch {}
+  let logFd = null;
+  try { logFd = fs.openSync(path.join(DATA_DIR, 'server.log'), 'a'); } catch (e) {
+    // 日志文件可能被启动时的重定向句柄独占, 此时继承父进程的 stdout/stderr,
+    // 否则新进程的输出会被丢弃, 重启后再无任何日志可查。
+    console.error('[重启] 无法打开日志文件(' + e.code + '), 改为继承当前输出句柄');
+  }
+  const out = logFd == null ? 1 : logFd;
+  const err = logFd == null ? 2 : logFd;
   try {
     const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
       cwd: ROOT,
       detached: true,
-      stdio: ['ignore', logFd, logFd],
+      stdio: ['ignore', out, err],
       env: { ...process.env, WINMON_RESTART_CHILD: '1' },
     });
     child.unref();
     console.log(`[重启] 已拉起新进程 PID=${child.pid}, 旧进程即将退出`);
   } catch (e) {
     console.error('[重启] 拉起新进程失败, 保持当前进程运行:', e.message);
-    if (logFd !== 'ignore') { try { fs.closeSync(logFd); } catch {} }
+    if (logFd != null) { try { fs.closeSync(logFd); } catch {} }
     return;
   }
-  if (logFd !== 'ignore') { try { fs.closeSync(logFd); } catch {} }
+  if (logFd != null) { try { fs.closeSync(logFd); } catch {} }
   // 不删除 server.pid: 新进程启动时会写入自己的 PID, 避免竞态导致 pid 文件丢失
   setTimeout(() => {
     try { server.close(); } catch {}
