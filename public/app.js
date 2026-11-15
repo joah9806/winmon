@@ -5,12 +5,19 @@ const main = $('#main');
 const state = {
   view: 'dashboard', hostId: null, item: 'cpu.util', range: 3600,
   alertsMode: 'active', triggers: [], hosts: [], catalog: null, modalOpen: false,
-  probeType: '', hostType: '',
-  selProbes: new Set(), selHosts: new Set(),
+  probeSearch: '', _restoreSearch: false,
+  selProbes: new Set(),
 };
 
 const DEVICE_TYPE_NAMES = { camera: '摄像机', switch: '交换机', firewall: '防火墙', controller: '设备控制器', linux: 'Linux服务器', windows: 'Windows电脑', db: '数据库服务器', network: '网络链路', app: '应用服务', other: '其他' };
+const TYPE_COLORS = { camera: '#4f8cff', switch: '#2ecc71', firewall: '#ff5c5c', controller: '#ffa940', linux: '#9b8cff', windows: '#3fb6e8', db: '#e879b9', network: '#5ad1c9', app: '#c9d14f', other: '#8493b8' };
 const CHECK_NAMES = { ping: 'Ping', tcp: '端口', http: 'HTTP', snmp: 'SNMP', db: '数据库' };
+
+function ipKey(addr) {
+  const m = String(addr || '').match(/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/);
+  if (m) return m.slice(1, 5).reduce((a, o) => a * 256 + Math.min(255, Number(o)), 0);
+  return Number.MAX_SAFE_INTEGER;
+}
 
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 function accentAlpha(a) {
@@ -25,6 +32,7 @@ function applyTheme(t) {
 }
 applyTheme(localStorage.getItem('winmon-theme') || 'dark');
 let serverStopped = false;
+let restarting = false;
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -113,13 +121,6 @@ function sevBadge(sev) {
 }
 
 /* ---------- 筛选 / 导入导出 ---------- */
-
-function typeFilterOptions(present, current, includeAgent) {
-  const opts = ['<option value="">全部类型</option>'];
-  if (includeAgent && present.has('agent')) opts.push(`<option value="agent" ${current === 'agent' ? 'selected' : ''}>Agent主机</option>`);
-  for (const [k, v] of Object.entries(DEVICE_TYPE_NAMES)) if (present.has(k)) opts.push(`<option value="${k}" ${current === k ? 'selected' : ''}>${v}</option>`);
-  return opts.join('');
-}
 
 function download(filename, text, mime) {
   const blob = new Blob([text], { type: mime || 'application/octet-stream' });
@@ -281,7 +282,6 @@ async function render() {
   if (state.view === 'probes') return renderProbes();
   if (state.view === 'alerts') return renderAlerts();
   if (state.view === 'triggers') return renderTriggers();
-  if (state.view === 'hosts') return renderHosts();
 }
 
 async function renderDashboard() {
@@ -341,22 +341,58 @@ function probeCard(h) {
 }
 
 async function renderProbes() {
-  let targets, hosts;
-  try { [targets, hosts] = await Promise.all([api('/api/targets'), api('/api/hosts')]); }
+  let targets, hosts, stats;
+  try { [targets, hosts, stats] = await Promise.all([api('/api/targets'), api('/api/hosts'), api('/api/stats')]); }
   catch (e) { main.innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`; return; }
   const hmap = {};
   for (const h of hosts) hmap[h.host_key] = h;
-  const present = new Set(targets.map(t => t.type));
-  const filtered = state.probeType ? targets.filter(t => t.type === state.probeType) : targets;
+  const q = state.probeSearch.trim().toLowerCase();
+  const filtered = q
+    ? targets.filter(t => (t.name || '').toLowerCase().includes(q) || (t.address || '').toLowerCase().includes(q))
+    : targets.slice();
   state.selProbes = new Set([...state.selProbes].filter(id => targets.some(t => t.id === id)));
+
+  const groups = {};
+  for (const t of filtered) (groups[t.type] = groups[t.type] || []).push(t);
+  const typeOrder = Object.keys(DEVICE_TYPE_NAMES).filter(k => groups[k]);
+  for (const k of Object.keys(groups)) if (!typeOrder.includes(k)) typeOrder.push(k);
+  let rowsHtml = '';
+  for (const k of typeOrder) {
+    const list = groups[k].sort((a, b) =>
+      ipKey(a.address) - ipKey(b.address) || String(a.address).localeCompare(String(b.address)) || a.name.localeCompare(b.name));
+    const color = TYPE_COLORS[k] || TYPE_COLORS.other;
+    rowsHtml += `<tr class="group-row"><td colspan="10"><span class="grp-mark" style="background:${color}"></span>${esc(DEVICE_TYPE_NAMES[k] || k)}<span class="grp-count">${list.length}</span></td></tr>`;
+    for (const t of list) {
+      const h = hmap['probe:' + t.id];
+      const st = h ? probeStatus(h) : { ok: true };
+      rowsHtml += `<tr>
+        <td><input type="checkbox" class="row-sel" data-sel="${t.id}" ${state.selProbes.has(t.id) ? 'checked' : ''}></td>
+        <td><b>${esc(t.name)}</b></td>
+        <td>${esc(DEVICE_TYPE_NAMES[t.type] || t.type)}</td>
+        <td>${esc(t.address)}</td>
+        <td>${t.checks.map(c => CHECK_NAMES[c.kind] || c.kind).join(' + ')}</td>
+        <td>${t.interval_sec}s</td>
+        <td><span class="dot ${st.ok ? 'on' : 'off'}"></span> ${st.ok ? '正常' : '异常'}</td>
+        <td style="max-width:220px;color:var(--red)">${esc(t.last_error || '')}</td>
+        <td><label class="switch"><input type="checkbox" data-en="${t.id}" ${t.enabled ? 'checked' : ''}><i></i></label></td>
+        <td style="white-space:nowrap">
+          <button class="btn ghost sm" data-test="${t.id}">测试</button>
+          <button class="btn ghost sm" data-edit="${t.id}">编辑</button>
+          <button class="btn danger sm" data-del="${t.id}">删除</button>
+        </td>
+      </tr>`;
+    }
+  }
+  if (!rowsHtml) rowsHtml = `<tr><td colspan="10" class="empty">${q ? '没有匹配的设备' : '暂无监控目标, 点击"新建监控目标"添加'}</td></tr>`;
+  const origin = location.origin;
   main.innerHTML = `
     <div class="toolbar">
       <button class="btn" id="addTarget">+ 新建监控目标</button>
       <button class="btn ghost" id="impTargets">导入</button>
       <button class="btn ghost" id="expTargets">导出</button>
-      <select id="probeTypeFilter" style="width:auto">${typeFilterOptions(present, state.probeType, false)}</select>
+      <input type="text" id="probeSearch" placeholder="搜索名称 / IP地址" style="width:220px" value="${esc(state.probeSearch)}">
       <div class="spacer"></div>
-      <span class="hint">共 ${targets.length} 个目标${state.probeType ? `, 筛选出 ${filtered.length} 个` : ''} · 无需安装Agent</span>
+      <span class="hint">共 ${targets.length} 台设备${q ? `, 匹配 ${filtered.length} 台` : ''} · 按类型分组 · IP 排序</span>
     </div>
     <div class="toolbar" id="probeBulk" style="display:none">
       <span class="hint">已选 <b id="probeSelCount">0</b> 项</span>
@@ -366,26 +402,18 @@ async function renderProbes() {
     </div>
     <div class="panel" style="padding:0;overflow-x:auto">
       <table><thead><tr><th style="width:34px"><input type="checkbox" id="selAllProbes" title="全选"></th><th>名称</th><th>类型</th><th>地址</th><th>探测方式</th><th>间隔</th><th>状态</th><th>最近错误</th><th>启用</th><th>操作</th></tr></thead>
-      <tbody>${filtered.map(t => {
-        const h = hmap['probe:' + t.id];
-        const st = h ? probeStatus(h) : { ok: true };
-        return `<tr>
-          <td><input type="checkbox" class="row-sel" data-sel="${t.id}" ${state.selProbes.has(t.id) ? 'checked' : ''}></td>
-          <td><b>${esc(t.name)}</b></td>
-          <td>${esc(DEVICE_TYPE_NAMES[t.type] || t.type)}</td>
-          <td>${esc(t.address)}</td>
-          <td>${t.checks.map(c => CHECK_NAMES[c.kind] || c.kind).join(' + ')}</td>
-          <td>${t.interval_sec}s</td>
-          <td><span class="dot ${st.ok ? 'on' : 'off'}"></span> ${st.ok ? '正常' : '异常'}</td>
-          <td style="max-width:220px;color:var(--red)">${esc(t.last_error || '')}</td>
-          <td><label class="switch"><input type="checkbox" data-en="${t.id}" ${t.enabled ? 'checked' : ''}><i></i></label></td>
-          <td style="white-space:nowrap">
-            <button class="btn ghost sm" data-test="${t.id}">测试</button>
-            <button class="btn ghost sm" data-edit="${t.id}">编辑</button>
-            <button class="btn danger sm" data-del="${t.id}">删除</button>
-          </td>
-        </tr>`;
-      }).join('') || `<tr><td colspan="10" class="empty">${state.probeType ? '该类型下暂无监控目标' : '暂无监控目标, 点击"新建监控目标"添加'}</td></tr>`}</tbody></table>
+      <tbody>${rowsHtml}</tbody></table>
+    </div>
+    <div class="panel">
+      <h2>接入新主机 (Agent 部署)</h2>
+      <div class="hint">
+        ${stats.agent_package ? '<a href="/download/agent-package.zip" download>下载 Agent 部署包 (agent-package.zip, 含运行时)</a><br>' : '提示: 在服务端目录运行 make-agent.bat 可生成 agent-package.zip 部署包<br>'}
+        1. 将 <b>agent-package.zip</b> 复制到目标 Windows 电脑并解压 (无需安装任何环境);<br>
+        2. 修改解压目录中 <b>config.json</b> 的 agent.server_url 为服务端地址, 例如:
+        <div class="code">"agent": { "server_url": "${esc(origin.replace('127.0.0.1', '服务端局域网IP'))}" }</div>
+        3. 双击 <b>agent.bat</b> 启动, 主机将自动注册并开始上报数据 (出现在"概览"中)。<br>
+        注: 若服务端 config.json 中设置了 token, Agent 端需填写相同的 token。
+      </div>
     </div>`;
   const updateProbeBulk = () => {
     const n = state.selProbes.size;
@@ -397,6 +425,13 @@ async function renderProbes() {
     all.indeterminate = selInView > 0 && selInView < filtered.length;
   };
   updateProbeBulk();
+  const search = $('#probeSearch');
+  search.oninput = () => {
+    state.probeSearch = search.value;
+    state._searchCaret = search.selectionStart;
+    state._restoreSearch = true;
+    renderProbes();
+  };
   $('#selAllProbes').onchange = e => {
     for (const t of filtered) e.target.checked ? state.selProbes.add(t.id) : state.selProbes.delete(t.id);
     renderProbes();
@@ -409,17 +444,16 @@ async function renderProbes() {
   $('#bulkClearProbes').onclick = () => { state.selProbes.clear(); renderProbes(); };
   $('#bulkDelProbes').onclick = () => {
     const ids = [...state.selProbes];
-    confirmModal(`删除所选 ${ids.length} 个监控目标?`, '其历史数据与告警将一并删除。', async () => {
+    confirmModal(`删除所选 ${ids.length} 台设备?`, '其历史数据与告警将一并删除, 探测配置同时移除(不再自动恢复)。', async () => {
       for (const id of ids) await api('/api/targets?id=' + id, { method: 'DELETE' });
       state.selProbes.clear();
-      toast(`已删除 ${ids.length} 个目标`); renderProbes();
+      toast(`已删除 ${ids.length} 台设备`); renderProbes();
     });
   };
   $('#bulkEditProbes').onclick = () => bulkEditProbes(targets);
   $('#addTarget').onclick = () => probeForm(null);
   $('#impTargets').onclick = () => importModal();
   $('#expTargets').onclick = () => exportModal(targets);
-  $('#probeTypeFilter').onchange = e => { state.probeType = e.target.value; renderProbes(); };
   main.querySelectorAll('[data-edit]').forEach(b => b.onclick = () => probeForm(targets.find(t => t.id === Number(b.dataset.edit))));
   main.querySelectorAll('[data-test]').forEach(b => b.onclick = async () => {
     const id = Number(b.dataset.test);
@@ -433,7 +467,7 @@ async function renderProbes() {
   });
   main.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
     const t = targets.find(x => x.id === Number(b.dataset.del));
-    confirmModal(`删除监控目标「${esc(t.name)}」?`, '其历史数据与告警将一并删除。', async () => {
+    confirmModal(`删除设备「${esc(t.name)}」?`, '其历史数据与告警将一并删除, 探测配置同时移除(不再自动恢复)。', async () => {
       await api('/api/targets?id=' + t.id, { method: 'DELETE' });
       toast('已删除'); renderProbes();
     });
@@ -445,6 +479,12 @@ async function renderProbes() {
       toast(sw.checked ? '已启用' : '已停用');
     } catch (e) { toast(e.message, true); sw.checked = !sw.checked; }
   });
+  if (state._restoreSearch) {
+    state._restoreSearch = false;
+    search.focus();
+    const c = state._searchCaret ?? search.value.length;
+    search.setSelectionRange(c, c);
+  }
 }
 
 function bulkEditProbes(targets) {
@@ -558,6 +598,9 @@ async function renderHost() {
       <button class="btn ghost sm" id="backBtn">← 返回概览</button>
       <h2><span class="dot ${h.online ? 'on' : 'off'}"></span> ${esc(h.name)}</h2>
       ${h.alerts > 0 ? `<span class="badge">${h.alerts} 条活动告警</span>` : '<span class="badge ok">正常</span>'}
+      <div class="spacer"></div>
+      ${h.kind === 'probe' ? '<button class="btn ghost sm" id="cfgHostBtn">探测配置</button>' : '<button class="btn ghost sm" id="renameHostBtn">重命名</button>'}
+      <button class="btn danger sm" id="delHostBtn">删除主机</button>
     </div>
     <div class="panel"><div class="kv">
       <div>主机标识: <b>${esc(h.host_key)}</b></div>
@@ -585,6 +628,37 @@ async function renderHost() {
       <tbody>${latest.map(r => `<tr><td>${esc(r.meta.name)}</td><td><b>${fmtVal(r.item, r.value)}</b></td><td>${fmtTime(r.ts)}</td></tr>`).join('')}</tbody></table>
     </div>`;
   $('#backBtn').onclick = () => { state.view = 'dashboard'; syncNav(); render(); };
+  if (h.kind === 'probe') {
+    $('#cfgHostBtn').onclick = async () => {
+      const tid = Number(String(h.host_key).slice(6));
+      try { const ts = await api('/api/targets'); probeForm(ts.find(t => t.id === tid)); }
+      catch (e) { toast(e.message, true); }
+    };
+  } else {
+    $('#renameHostBtn').onclick = () => {
+      openModal(`<h3>重命名主机</h3>
+        <div class="form-row"><label>显示名称</label><input type="text" id="rnName" value="${esc(h.name)}"></div>
+        <div class="form-actions"><button class="btn ghost" id="rnCancel">取消</button><button class="btn" id="rnSave">保存</button></div>`);
+      $('#rnCancel').onclick = closeModal;
+      $('#rnSave').onclick = async () => {
+        const name = $('#rnName').value.trim();
+        if (!name) return toast('名称不能为空', true);
+        try {
+          await api('/api/host?id=' + h.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+          toast('已保存'); closeModal(); renderHost();
+        } catch (e) { toast(e.message, true); }
+      };
+    };
+  }
+  $('#delHostBtn').onclick = () => {
+    const desc = h.kind === 'probe'
+      ? '该设备的历史数据、告警与探测配置将一并删除(不再自动恢复)。'
+      : '该主机的所有历史数据和告警将被删除, Agent 再次上报时会重新注册。';
+    confirmModal(`删除主机「${esc(h.name)}」?`, desc, async () => {
+      await api('/api/host?id=' + h.id, { method: 'DELETE' });
+      toast('已删除'); state.view = 'dashboard'; syncNav(); render();
+    });
+  };
   $('#itemSel').onchange = e => { state.item = e.target.value; loadChart(); };
   $('#rangeSeg').querySelectorAll('button').forEach(b => b.onclick = () => {
     state.range = Number(b.dataset.range);
@@ -861,169 +935,6 @@ function trigForm(t) {
   };
 }
 
-/* ---------- 主机管理 ---------- */
-
-async function renderHosts() {
-  let hosts, stats, targets;
-  try { [hosts, stats, targets] = await Promise.all([api('/api/hosts'), api('/api/stats'), api('/api/targets')]); }
-  catch (e) { main.innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`; return; }
-  state.hosts = hosts;
-  const tmap = {};
-  for (const t of targets) tmap['probe:' + t.id] = t;
-  const origin = location.origin;
-  const present = new Set(hosts.map(h => h.kind === 'probe' ? h.dtype : 'agent'));
-  const filtered = state.hostType
-    ? hosts.filter(h => state.hostType === 'agent' ? h.kind !== 'probe' : (h.kind === 'probe' && h.dtype === state.hostType))
-    : hosts;
-  state.selHosts = new Set([...state.selHosts].filter(id => hosts.some(h => h.id === id)));
-  main.innerHTML = `
-    <div class="toolbar">
-      <select id="hostTypeFilter" style="width:auto">${typeFilterOptions(present, state.hostType, true)}</select>
-      <div class="spacer"></div>
-      <span class="hint">共 ${hosts.length} 台主机${state.hostType ? `, 筛选出 ${filtered.length} 台` : ''}</span>
-    </div>
-    <div class="toolbar" id="hostBulk" style="display:none">
-      <span class="hint">已选 <b id="hostSelCount">0</b> 台</span>
-      <button class="btn ghost sm" id="bulkEditHosts">批量修改</button>
-      <button class="btn danger sm" id="bulkDelHosts">批量删除</button>
-      <button class="btn ghost sm" id="bulkClearHosts">清除选择</button>
-    </div>
-    <div class="panel" style="padding:0;overflow-x:auto">
-      <table><thead><tr><th style="width:34px"><input type="checkbox" id="selAllHosts" title="全选"></th><th>名称</th><th>类型</th><th>主机标识</th><th>IP</th><th>系统/设备</th><th>最后上报</th><th>状态</th><th>告警</th><th>操作</th></tr></thead>
-      <tbody>${filtered.map(h => `<tr>
-        <td><input type="checkbox" class="row-sel" data-sel="${h.id}" ${state.selHosts.has(h.id) ? 'checked' : ''}></td>
-        <td><b>${esc(h.name)}</b></td>
-        <td>${h.kind === 'probe' ? esc(DEVICE_TYPE_NAMES[h.dtype] || '设备') : 'Agent主机'}</td>
-        <td>${esc(h.host_key)}</td>
-        <td>${esc(h.ip || '-')}</td>
-        <td>${esc(h.kind === 'probe' ? (DEVICE_TYPE_NAMES[h.dtype] || '-') : (h.os || '-'))}</td>
-        <td style="white-space:nowrap">${fmtAgo(h.last_seen)}</td>
-        <td><span class="dot ${h.online ? 'on' : 'off'}"></span> ${h.online ? '在线' : '离线'}</td>
-        <td>${h.alerts > 0 ? `<span class="badge">${h.alerts}</span>` : '-'}</td>
-        <td style="white-space:nowrap">
-          <button class="btn ghost sm" data-detail="${h.id}">详情</button>
-          ${h.kind === 'probe' ? `<button class="btn ghost sm" data-cfg="${h.id}">配置</button>` : `<button class="btn ghost sm" data-rename="${h.id}">重命名</button>`}
-          <button class="btn danger sm" data-del="${h.id}">删除</button>
-        </td>
-      </tr>`).join('') || `<tr><td colspan="10" class="empty">${state.hostType ? '该类型下暂无主机' : '暂无主机'}</td></tr>`}</tbody></table>
-    </div>
-    <div class="panel">
-      <h2>接入新主机 (Agent 部署)</h2>
-      <div class="hint">
-        ${stats.agent_package ? '<a href="/download/agent-package.zip" download>下载 Agent 部署包 (agent-package.zip, 含运行时)</a><br>' : '提示: 在服务端目录运行 make-agent.bat 可生成 agent-package.zip 部署包<br>'}
-        1. 将 <b>agent-package.zip</b> 复制到目标 Windows 电脑并解压 (无需安装任何环境);<br>
-        2. 修改解压目录中 <b>config.json</b> 的 agent.server_url 为服务端地址, 例如:
-        <div class="code">"agent": { "server_url": "${esc(origin.replace('127.0.0.1', '服务端局域网IP'))}" }</div>
-        3. 双击 <b>agent.bat</b> 启动, 主机将自动注册并开始上报数据。<br>
-        注: 若服务端 config.json 中设置了 token, Agent 端需填写相同的 token。
-      </div>
-    </div>`;
-  const updateHostBulk = () => {
-    const n = state.selHosts.size;
-    $('#hostBulk').style.display = n ? 'flex' : 'none';
-    $('#hostSelCount').textContent = n;
-    const all = $('#selAllHosts');
-    const selInView = filtered.filter(h => state.selHosts.has(h.id)).length;
-    all.checked = filtered.length > 0 && selInView === filtered.length;
-    all.indeterminate = selInView > 0 && selInView < filtered.length;
-  };
-  updateHostBulk();
-  $('#selAllHosts').onchange = e => {
-    for (const h of filtered) e.target.checked ? state.selHosts.add(h.id) : state.selHosts.delete(h.id);
-    renderHosts();
-  };
-  main.querySelectorAll('.row-sel').forEach(cb => cb.onchange = () => {
-    const id = Number(cb.dataset.sel);
-    cb.checked ? state.selHosts.add(id) : state.selHosts.delete(id);
-    updateHostBulk();
-  });
-  $('#bulkClearHosts').onclick = () => { state.selHosts.clear(); renderHosts(); };
-  $('#bulkDelHosts').onclick = () => {
-    const ids = [...state.selHosts];
-    confirmModal(`删除所选 ${ids.length} 台主机?`, '其历史数据与告警将一并删除。探测设备会同时删除其探测配置(不再自动恢复); Agent 主机再次上报时会重新注册。', async () => {
-      for (const id of ids) await api('/api/host?id=' + id, { method: 'DELETE' });
-      state.selHosts.clear();
-      toast(`已删除 ${ids.length} 台主机`); renderHosts();
-    });
-  };
-  $('#bulkEditHosts').onclick = () => bulkEditHosts(hosts, targets);
-  $('#hostTypeFilter').onchange = e => { state.hostType = e.target.value; renderHosts(); };
-  main.querySelectorAll('[data-detail]').forEach(b => b.onclick = () => openHost(Number(b.dataset.detail)));
-  main.querySelectorAll('[data-cfg]').forEach(b => b.onclick = () => {
-    const h = hosts.find(x => x.id === Number(b.dataset.cfg));
-    probeForm(tmap[h.host_key]);
-  });
-  main.querySelectorAll('[data-rename]').forEach(b => b.onclick = () => {
-    const h = hosts.find(x => x.id === Number(b.dataset.rename));
-    openModal(`
-      <h3>重命名主机</h3>
-      <div class="form-row"><label>显示名称</label><input type="text" id="fName" value="${esc(h.name)}"></div>
-      <div class="form-actions"><button class="btn ghost" id="fCancel">取消</button><button class="btn" id="fSave">保存</button></div>`);
-    $('#fCancel').onclick = closeModal;
-    $('#fSave').onclick = async () => {
-      const name = $('#fName').value.trim();
-      if (!name) return toast('名称不能为空', true);
-      try {
-        await api('/api/host?id=' + h.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
-        toast('已保存'); closeModal(); renderHosts();
-      } catch (e) { toast(e.message, true); }
-    };
-  });
-  main.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
-    const h = hosts.find(x => x.id === Number(b.dataset.del));
-    confirmModal(`删除主机「${esc(h.name)}」?`, '该主机的所有历史数据和告警将被删除, Agent 再次上报时会重新注册。', async () => {
-      await api('/api/host?id=' + h.id, { method: 'DELETE' });
-      toast('已删除');
-      renderHosts();
-    });
-  });
-}
-
-function bulkEditHosts(hosts, targets) {
-  const sel = hosts.filter(h => state.selHosts.has(h.id));
-  const probeSel = sel.filter(h => h.kind === 'probe');
-  const tmap = {};
-  for (const t of targets) tmap['probe:' + t.id] = t;
-  openModal(`
-    <h3>批量修改 (${sel.length} 台主机)</h3>
-    <div class="hint">留空的项不会被修改; 名称替换只影响包含"查找内容"的主机。</div>
-    <div class="form-row inline">
-      <div><label>名称查找</label><input type="text" id="bhFind" placeholder="如: 摄像机"></div>
-      <div><label>替换为</label><input type="text" id="bhRepl" placeholder="如: 摄像头"></div>
-    </div>
-    ${probeSel.length ? `<div class="form-row"><label>探测启用状态 (仅 ${probeSel.length} 台探测设备)</label><select id="bhEnabled">
-      <option value="">保持不变</option><option value="1">启用</option><option value="0">停用</option>
-    </select></div>` : ''}
-    <div class="form-actions"><button class="btn ghost" id="bhCancel">取消</button><button class="btn" id="bhOk">应用</button></div>`);
-  $('#bhCancel').onclick = closeModal;
-  $('#bhOk').onclick = async () => {
-    const find = $('#bhFind').value;
-    const repl = $('#bhRepl').value;
-    const en = $('#bhEnabled') ? $('#bhEnabled').value : '';
-    if (!find && en === '') return toast('未选择任何修改项', true);
-    let ok = 0, fail = 0;
-    for (const h of sel) {
-      if (find && h.name.includes(find)) {
-        try {
-          await api('/api/host?id=' + h.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: h.name.replaceAll(find, repl) }) });
-          ok++;
-        } catch { fail++; }
-      }
-      if (en !== '' && h.kind === 'probe') {
-        const t = tmap[h.host_key];
-        if (!t) continue;
-        try {
-          await api('/api/targets?id=' + t.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...t, enabled: en === '1' }) });
-          ok++;
-        } catch { fail++; }
-      }
-    }
-    closeModal();
-    toast(fail ? `已修改 ${ok} 项, ${fail} 项失败` : `已修改 ${ok} 项`, !!fail);
-    renderHosts();
-  };
-}
-
 /* ---------- 弹窗 ---------- */
 
 function openModal(html) {
@@ -1038,15 +949,82 @@ function closeModal() {
   $('#modalRoot').innerHTML = '';
 }
 
-function confirmModal(title, desc, onOk) {
+function confirmModal(title, desc, onOk, okLabel = '确认删除', okClass = 'danger') {
   openModal(`
     <h3>${title}</h3>
     <div class="hint">${desc}</div>
-    <div class="form-actions"><button class="btn ghost" id="cCancel">取消</button><button class="btn danger" id="cOk">确认删除</button></div>`);
+    <div class="form-actions"><button class="btn ghost" id="cCancel">取消</button><button class="btn ${okClass}" id="cOk">${okLabel}</button></div>`);
   $('#cCancel').onclick = closeModal;
   $('#cOk').onclick = async () => {
     try { await onOk(); closeModal(); }
     catch (e) { toast(e.message, true); }
+  };
+}
+
+/* ---------- 通知设置 ---------- */
+
+async function notifyModal() {
+  let cfg;
+  try { cfg = await api('/api/notify'); } catch (e) { return toast(e.message, true); }
+  const m = cfg.mail || {};
+  openModal(`
+    <h3>告警通知设置</h3>
+    <div class="hint">告警触发与恢复时推送通知。邮件与 Webhook 可同时启用。</div>
+    <div class="form-row"><label class="check"><input type="checkbox" id="ntMailEn" ${m.enabled ? 'checked' : ''}> 启用邮件通知 (SMTP)</label></div>
+    <div class="form-row inline">
+      <div><label>SMTP 服务器</label><input type="text" id="ntHost" value="${esc(m.host || '')}" placeholder="smtp.example.com"></div>
+      <div><label>端口</label><input type="number" id="ntPort" value="${m.port || 465}"></div>
+      <div><label>加密方式</label><select id="ntSecure">
+        <option value="ssl" ${m.secure !== 'starttls' && m.secure !== 'none' ? 'selected' : ''}>SSL (465)</option>
+        <option value="starttls" ${m.secure === 'starttls' ? 'selected' : ''}>STARTTLS (587)</option>
+        <option value="none" ${m.secure === 'none' ? 'selected' : ''}>无加密 (25)</option>
+      </select></div>
+    </div>
+    <div class="form-row inline">
+      <div><label>用户名</label><input type="text" id="ntUser" value="${esc(m.user || '')}" placeholder="登录账号"></div>
+      <div><label>密码 / 授权码</label><input type="password" id="ntPass" value="" placeholder="${m.has_pass ? '已保存, 留空保持不变' : 'SMTP 密码或授权码'}"></div>
+    </div>
+    <div class="form-row inline">
+      <div><label>发件人</label><input type="text" id="ntFrom" value="${esc(m.from || '')}" placeholder="默认同用户名"></div>
+      <div><label>收件人 (多个用逗号分隔)</label><input type="text" id="ntTo" value="${esc(m.to || '')}" placeholder="a@x.com, b@y.com"></div>
+    </div>
+    <div class="form-row"><label>Webhook 地址 (可选, 钉钉/企业微信/飞书等机器人)</label><input type="text" id="ntWebhook" value="${esc(cfg.webhook_url || '')}" placeholder="https://..."></div>
+    <div class="hint" id="ntMsg"></div>
+    <div class="form-actions">
+      <button class="btn ghost" id="ntTest">发送测试邮件</button>
+      <div style="flex:1"></div>
+      <button class="btn ghost" id="ntCancel">取消</button>
+      <button class="btn" id="ntSave">保存</button>
+    </div>`);
+  const defPort = { ssl: 465, starttls: 587, none: 25 };
+  $('#ntSecure').onchange = e => { $('#ntPort').value = defPort[e.target.value] || 465; };
+  const collect = () => ({
+    webhook_url: $('#ntWebhook').value.trim(),
+    mail: {
+      enabled: $('#ntMailEn').checked, host: $('#ntHost').value.trim(), port: Number($('#ntPort').value) || 465,
+      secure: $('#ntSecure').value, user: $('#ntUser').value.trim(), pass: $('#ntPass').value,
+      from: $('#ntFrom').value.trim(), to: $('#ntTo').value.trim(),
+    },
+  });
+  const save = () => api('/api/notify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(collect()) });
+  $('#ntCancel').onclick = closeModal;
+  $('#ntSave').onclick = async () => {
+    try { await save(); toast('通知设置已保存'); closeModal(); }
+    catch (e) { toast(e.message, true); }
+  };
+  $('#ntTest').onclick = async () => {
+    const btn = $('#ntTest'); btn.disabled = true;
+    $('#ntMsg').style.color = 'var(--muted)'; $('#ntMsg').textContent = '正在保存并发送测试邮件...';
+    try {
+      await save();
+      await api('/api/mail/test', { method: 'POST' });
+      $('#ntMsg').style.color = 'var(--green)'; $('#ntMsg').textContent = '测试邮件已发送, 请检查收件箱(含垃圾箱)。';
+      $('#ntPass').value = ''; $('#ntPass').placeholder = '已保存, 留空保持不变';
+      toast('测试邮件已发送');
+    } catch (e) {
+      $('#ntMsg').style.color = 'var(--red)'; $('#ntMsg').textContent = e.message;
+      toast(e.message, true);
+    } finally { btn.disabled = false; }
   };
 }
 
@@ -1070,17 +1048,47 @@ $('#themeToggle').onclick = () => {
   render();
 };
 
+$('#notifyBtn').onclick = () => notifyModal();
+
 $('#shutdownBtn').onclick = () => {
   confirmModal('停止监控服务?', '服务进程将退出, 本页面随之不可用。之后可双击 start.bat 重新启动。', async () => {
     await api('/api/shutdown', { method: 'POST' });
     serverStopped = true;
     $('#serverStatus').innerHTML = '<span class="dot" style="background:var(--red)"></span>已停止';
     toast('服务已停止');
-  });
+  }, '确认停止');
 };
 
+$('#restartBtn').onclick = () => {
+  confirmModal('重启监控服务?', '服务将短暂中断(约 2-3 秒)后自动恢复, 页面会在恢复后自动刷新。', async () => {
+    await api('/api/restart', { method: 'POST' });
+    restarting = true;
+    $('#serverStatus').innerHTML = '<span class="dot" style="background:var(--orange)"></span>重启中...';
+    toast('正在重启服务...');
+    waitForRestart();
+  }, '确认重启', '');
+};
+
+async function waitForRestart() {
+  const start = Date.now();
+  let sawDown = false;
+  const tick = async () => {
+    if (Date.now() - start > 30000) {
+      $('#serverStatus').innerHTML = '<span class="dot" style="background:var(--red)"></span>重启超时';
+      toast('重启超时, 请手动刷新页面或检查服务', true);
+      return;
+    }
+    try {
+      const h = await api('/api/health');
+      if (sawDown || h.uptime < 5) { location.reload(); return; }
+    } catch { sawDown = true; }
+    setTimeout(tick, 800);
+  };
+  setTimeout(tick, 1200);
+}
+
 async function pollStatus() {
-  if (serverStopped) return;
+  if (serverStopped || restarting) return;
   const el = $('#serverStatus');
   try {
     const s = await api('/api/stats');
@@ -1091,7 +1099,9 @@ async function pollStatus() {
 }
 
 setInterval(() => {
-  if (serverStopped || state.modalOpen) return;
+  if (serverStopped || restarting || state.modalOpen) return;
+  const ae = document.activeElement;
+  if (ae && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName)) return;
   if (['dashboard', 'host', 'alerts', 'probes'].includes(state.view)) render();
 }, 10000);
 

@@ -12,13 +12,14 @@
   <div class="logo">Win<span>Mon</span> 监控系统</div>
   <nav id="nav">
     <button data-view="dashboard" class="active">概览</button>
-    <button data-view="probes">探测配置</button>
+    <button data-view="probes">主机管理</button>
     <button data-view="alerts">告警中心</button>
     <button data-view="triggers">触发器</button>
-    <button data-view="hosts">主机管理</button>
   </nav>
   <div class="header-actions">
+    <button class="btn ghost sm" id="notifyBtn" title="配置告警通知(邮件/Webhook)">通知设置</button>
     <button class="btn ghost sm" id="themeToggle" title="切换深浅主题">浅色</button>
+    <button class="btn ghost sm" id="restartBtn" title="重启监控服务">重启服务</button>
     <button class="btn danger sm" id="shutdownBtn" title="停止监控服务">停止服务</button>
   </div>
   <div class="server-status" id="serverStatus"><span class="dot"></span>连接中...</div>

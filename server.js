@@ -6,9 +6,11 @@ const DB = require('./lib/db');
 const metrics = require('./lib/metrics');
 const alert = require('./lib/alert');
 const probe = require('./lib/probe');
+const mailer = require('./lib/mailer');
+const { spawn } = require('node:child_process');
 
 const ROOT = __dirname;
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const CONFIG_FILE = path.join(ROOT, 'config.json');
 const DATA_DIR = path.join(ROOT, 'data');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -20,6 +22,7 @@ const DEFAULT_CONFIG = {
   retention_days: 7,
   token: '',
   webhook_url: '',
+  mail: { enabled: false, host: '', port: 465, secure: 'ssl', user: '', pass: '', from: '', to: '' },
 };
 
 function loadConfig() {
@@ -37,7 +40,12 @@ function loadConfig() {
     retention_days: cfg.retention_days ?? DEFAULT_CONFIG.retention_days,
     token: cfg.token ?? '',
     webhook_url: cfg.webhook_url ?? '',
+    mail: { ...DEFAULT_CONFIG.mail, ...(cfg.mail || {}) },
   };
+}
+
+function saveConfig() {
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
 }
 
 const cfg = loadConfig();
@@ -85,7 +93,7 @@ function ingest(info, m, ts) {
   const hostId = db.upsertHost(info, ts);
   db.insertHistory(hostId, m, ts);
   const host = db.getHost(hostId);
-  alert.evaluate(db, host, m, ts, cfg.webhook_url);
+  alert.evaluate(db, host, m, ts, cfg);
   return hostId;
 }
 
@@ -134,6 +142,59 @@ const server = http.createServer(async (req, res) => {
         json(res, 200, { ok: true });
         setTimeout(shutdown, 300);
         return;
+      }
+      if (req.method === 'POST' && p === '/api/restart') {
+        const ra = req.socket.remoteAddress || '';
+        if (ra !== '127.0.0.1' && ra !== '::1' && ra !== '::ffff:127.0.0.1') {
+          return json(res, 403, { error: '仅允许本机回环地址重启服务' });
+        }
+        json(res, 200, { ok: true });
+        setTimeout(restart, 300);
+        return;
+      }
+      if (req.method === 'GET' && p === '/api/notify') {
+        const m = cfg.mail || {};
+        return json(res, 200, {
+          webhook_url: cfg.webhook_url || '',
+          mail: {
+            enabled: !!m.enabled, host: m.host || '', port: m.port || 465,
+            secure: m.secure || 'ssl', user: m.user || '', from: m.from || '', to: m.to || '',
+            has_pass: !!m.pass,
+          },
+        });
+      }
+      if (req.method === 'POST' && p === '/api/notify') {
+        const b = await readBody(req);
+        cfg.webhook_url = String(b.webhook_url || '').trim().slice(0, 500);
+        const m = b.mail || {};
+        const secure = ['ssl', 'starttls', 'none'].includes(m.secure) ? m.secure : 'ssl';
+        const defPort = secure === 'ssl' ? 465 : secure === 'starttls' ? 587 : 25;
+        const port = Math.max(1, Math.min(65535, Math.floor(Number(m.port) || defPort)));
+        const pass = String(m.pass || '');
+        cfg.mail = {
+          enabled: !!m.enabled,
+          host: String(m.host || '').trim().slice(0, 255),
+          port, secure,
+          user: String(m.user || '').trim().slice(0, 255),
+          pass: pass ? pass.slice(0, 255) : (cfg.mail.pass || ''),
+          from: String(m.from || '').trim().slice(0, 255),
+          to: String(m.to || '').trim().slice(0, 500),
+        };
+        saveConfig();
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === 'POST' && p === '/api/mail/test') {
+        if (!cfg.mail || !cfg.mail.host) return json(res, 400, { error: '请先填写并保存 SMTP 服务器地址' });
+        if (!cfg.mail.to) return json(res, 400, { error: '请先填写收件人邮箱' });
+        try {
+          await mailer.sendMail({ ...cfg.mail, enabled: true }, {
+            subject: '[WinMon] 测试邮件',
+            text: `这是一封来自 WinMon 监控系统的测试邮件。\n\n如果你收到此邮件, 说明 SMTP 邮件通知配置成功。\n\n发送时间: ${new Date().toLocaleString('zh-CN', { hour12: false })}\n\n— WinMon 监控系统`,
+          });
+          return json(res, 200, { ok: true });
+        } catch (e) {
+          return json(res, 500, { error: '邮件发送失败: ' + e.message });
+        }
       }
       if (req.method === 'GET' && p === '/api/hosts') {
         const now = Date.now();
@@ -232,7 +293,9 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { ok: true });
       }
       if (req.method === 'DELETE' && p === '/api/targets') {
-        db.deleteTarget(Number(u.searchParams.get('id')));
+        const id = Number(u.searchParams.get('id'));
+        db.deleteTarget(id);
+        probeNext.delete(id);
         return json(res, 200, { ok: true });
       }
       if (req.method === 'POST' && p === '/api/targets/test') {
@@ -334,7 +397,7 @@ async function localTick() {
 function offlineTick() {
   try {
     const timeout = Math.max(90000, cfg.collection.interval_sec * 4000);
-    alert.checkOffline(db, db.getHosts(), Date.now(), timeout, cfg.webhook_url);
+    alert.checkOffline(db, db.getHosts(), Date.now(), timeout, cfg);
   } catch (e) { console.error('[离线检查失败]', e.message); }
 }
 
@@ -363,11 +426,12 @@ function probeTick() {
         const checks = t.checks.filter(c => c.enabled);
         if (!checks.length) return;
         const r = await probe.runTarget(t, checks);
+        if (!db.getTarget(t.id)) return; // 探测期间目标已被删除, 不再重建主机/告警
         const ts = Date.now();
         const hostId = db.upsertProbeHost(t, ts);
         if (Object.keys(r.metrics).length) {
           db.insertHistory(hostId, r.metrics, ts);
-          alert.evaluate(db, db.getHost(hostId), r.metrics, ts, cfg.webhook_url);
+          alert.evaluate(db, db.getHost(hostId), r.metrics, ts, cfg);
         }
         db.setTargetError(t.id, r.error);
       } catch (e) { console.error('[探测失败]', t.name, e.message); }
@@ -376,28 +440,45 @@ function probeTick() {
   }
 }
 
-server.listen(cfg.server.port, cfg.server.host, () => {
-  console.log('======================================================');
-  console.log(`  WinMon 监控系统 v${VERSION} 已启动`);
-  console.log(`  Web 管理界面: http://127.0.0.1:${cfg.server.port}`);
-  console.log(`  本机采集间隔: ${cfg.collection.interval_sec} 秒, 数据保留: ${cfg.retention_days} 天`);
-  console.log(`  Agent 上报地址: http://<本机IP>:${cfg.server.port}/api/push`);
-  console.log('  按 Ctrl+C 停止服务');
-  console.log('======================================================');
-  if (process.platform === 'win32' && cfg.server.open_browser !== false) {
-    require('node:child_process').exec(`start "" "http://127.0.0.1:${cfg.server.port}"`);
-  }
-  setTimeout(localTick, 1500);
-  setInterval(localTick, cfg.collection.interval_sec * 1000);
-  setInterval(offlineTick, 15000);
-  setInterval(cleanupTick, 3600000);
-  setTimeout(cleanupTick, 5000);
-  setInterval(probeTick, 1000);
-  setTimeout(probeTick, 2000);
-});
+const isRestartChild = process.env.WINMON_RESTART_CHILD === '1';
+let listenAttempts = 0;
+function startListen() {
+  server.listen(cfg.server.port, cfg.server.host, () => {
+    console.log('======================================================');
+    console.log(`  WinMon 监控系统 v${VERSION} 已启动`);
+    console.log(`  Web 管理界面: http://127.0.0.1:${cfg.server.port}`);
+    console.log(`  本机采集间隔: ${cfg.collection.interval_sec} 秒, 数据保留: ${cfg.retention_days} 天`);
+    console.log(`  Agent 上报地址: http://<本机IP>:${cfg.server.port}/api/push`);
+    console.log('  按 Ctrl+C 停止服务');
+    console.log('======================================================');
+    if (!isRestartChild && process.platform === 'win32' && cfg.server.open_browser !== false) {
+      require('node:child_process').exec(`start "" "http://127.0.0.1:${cfg.server.port}"`);
+    }
+    setTimeout(localTick, 1500);
+    setInterval(localTick, cfg.collection.interval_sec * 1000);
+    setInterval(offlineTick, 15000);
+    setInterval(cleanupTick, 3600000);
+    setTimeout(cleanupTick, 5000);
+    setInterval(probeTick, 1000);
+    setTimeout(probeTick, 2000);
+  });
+}
+
+if (isRestartChild) {
+  console.log('[重启] 新进程已拉起, 等待旧进程释放端口...');
+  setTimeout(startListen, 1200);
+} else {
+  startListen();
+}
 
 server.on('error', e => {
   if (e.code === 'EADDRINUSE') {
+    if (isRestartChild && listenAttempts < 10) {
+      listenAttempts++;
+      console.error(`[重启] 端口仍被占用, 重试 ${listenAttempts}/10...`);
+      setTimeout(startListen, 1000);
+      return;
+    }
     console.error(`端口 ${cfg.server.port} 已被占用, 请修改 config.json 中的 server.port 后重试`);
   } else {
     console.error('服务启动失败:', e.message);
@@ -410,6 +491,33 @@ function shutdown() {
   try { db.close(); } catch {}
   try { fs.unlinkSync(path.join(DATA_DIR, 'server.pid')); } catch {}
   process.exit(0);
+}
+
+function restart() {
+  console.log('\n正在重启服务...');
+  let logFd = 'ignore';
+  try { logFd = fs.openSync(path.join(DATA_DIR, 'server.log'), 'a'); } catch {}
+  try {
+    const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
+      cwd: ROOT,
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: { ...process.env, WINMON_RESTART_CHILD: '1' },
+    });
+    child.unref();
+    console.log(`[重启] 已拉起新进程 PID=${child.pid}, 旧进程即将退出`);
+  } catch (e) {
+    console.error('[重启] 拉起新进程失败, 保持当前进程运行:', e.message);
+    if (logFd !== 'ignore') { try { fs.closeSync(logFd); } catch {} }
+    return;
+  }
+  if (logFd !== 'ignore') { try { fs.closeSync(logFd); } catch {} }
+  // 不删除 server.pid: 新进程启动时会写入自己的 PID, 避免竞态导致 pid 文件丢失
+  setTimeout(() => {
+    try { server.close(); } catch {}
+    try { db.close(); } catch {}
+    process.exit(0);
+  }, 400);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

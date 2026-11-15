@@ -18,5 +18,15 @@
   },
   "retention_days": 7,
   "token": "",
-  "webhook_url": ""
+  "webhook_url": "",
+  "mail": {
+    "enabled": false,
+    "host": "",
+    "port": 465,
+    "secure": "ssl",
+    "user": "",
+    "pass": "",
+    "from": "",
+    "to": ""
+  }
 }
