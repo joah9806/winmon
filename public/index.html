@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WinMon 监控系统</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%234f8cff'/><path d='M6 20l5-8 4 6 4-10 7 12' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+</head>
+<body>
+<header>
+  <div class="logo">Win<span>Mon</span> 监控系统</div>
+  <nav id="nav">
+    <button data-view="dashboard" class="active">概览</button>
+    <button data-view="probes">探测配置</button>
+    <button data-view="alerts">告警中心</button>
+    <button data-view="triggers">触发器</button>
+    <button data-view="hosts">主机管理</button>
+  </nav>
+  <div class="server-status" id="serverStatus"><span class="dot"></span>连接中...</div>
+</header>
+<main id="main"></main>
+<div id="modalRoot"></div>
+<div id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>

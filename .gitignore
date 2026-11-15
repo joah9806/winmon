@@ -1,0 +1,12 @@
+# Bundled runtimes (distributed as GitHub Release assets, >100MB)
+runtime/
+# Prebuilt agent packages (Release assets)
+*.zip
+# Runtime data / logs / pid
+data/
+*.log
+*.pid
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
