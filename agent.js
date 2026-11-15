@@ -3,9 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const metrics = require('./lib/metrics');
 const httpc = require('./lib/httpc');
+const paths = require('./lib/paths');
 
-const ROOT = __dirname;
-const CONFIG_FILE = path.join(ROOT, 'config.json');
+const ROOT = paths.ROOT;
+const CONFIG_FILE = paths.CONFIG_FILE;
 
 const DEFAULT_AGENT = { server_url: 'http://127.0.0.1:8686', token: '', interval_sec: 15, hostname: '', name: '' };
 
@@ -15,7 +16,7 @@ function loadConfig() {
     try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); }
     catch (e) { console.error('config.json 解析失败, 使用默认配置:', e.message); }
   } else {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify({ agent: DEFAULT_AGENT }, null, 2), 'utf8');
+    paths.writeQuiet(CONFIG_FILE, JSON.stringify({ agent: DEFAULT_AGENT }, null, 2));
   }
   return { ...DEFAULT_AGENT, ...cfg.agent };
 }
@@ -29,7 +30,9 @@ const info = metrics.hostInfo();
 if (cfg.hostname) info.key = cfg.hostname;
 if (cfg.name) info.name = cfg.name;
 
-fs.writeFileSync(path.join(ROOT, 'agent.pid'), String(process.pid), 'utf8');
+const PID_FILE = path.join(paths.DATA_DIR, 'agent.pid');
+paths.writeQuiet(PID_FILE, String(process.pid));
+if (paths.redirected) console.log('[路径] 程序目录不可写, 数据目录: ' + paths.DATA_DIR);
 
 let failures = 0;
 let running = false;
@@ -68,7 +71,7 @@ setInterval(tick, intervalMs);
 
 function shutdown() {
   console.log('\nAgent 已停止');
-  try { fs.unlinkSync(path.join(ROOT, 'agent.pid')); } catch {}
+  try { fs.unlinkSync(PID_FILE); } catch {}
   process.exit(0);
 }
 process.on('SIGINT', shutdown);

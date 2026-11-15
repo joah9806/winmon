@@ -5,11 +5,38 @@
 ## 快速开始
 
 1. 到 [Releases](../../releases) 下载 `winmon-server-windows.zip`。
-2. 解压到任意目录，双击 `start.bat`（**默认后台运行，无残留 cmd 窗口**）。
-3. 浏览器自动打开 `http://127.0.0.1:8686`。
+2. 解压到**可写目录**（推荐 `D:\WinMon`，不要放在 `Program Files` 或 C 盘根目录），双击 `start.bat`。
+3. 启动器会先做一遍环境自检，通过后后台启动服务并确认接口已响应，浏览器自动打开 `http://127.0.0.1:8686`。
+
+`start.bat` 的四步流程：检查运行时 → 环境自检 → 后台启动（无残留 cmd 窗口）→ 轮询健康接口确认真的起来了。
+**任何一步失败都会留在窗口里并给出原因**，同时生成中文诊断报告；后台启动超时会自动转为前台运行，把报错直接打在屏幕上。
 
 停止服务：双击 `stop.bat`，或点 Web 界面右上角「停止服务」。重启服务：点右上角「重启服务」（短暂中断后自动恢复，页面自动刷新）。后台运行日志见 `data/server.log`。
 如需前台控制台调试，用 `start-console.bat`。
+
+## 启动不了怎么办
+
+双击 **`diagnose.bat`**，它会逐项检查并生成中文报告 `data/diagnose.txt`（UTF-8 带 BOM，Win7 记事本可正常显示）并自动打开：
+
+| 检查项 | 说明 |
+|--------|------|
+| 运行时 | Node 版本与位数、`node.exe` / `node-x86.exe` 是否存在且完整、与系统位数是否匹配 |
+| 系统 | Windows 版本与是否安装 SP1（Win7 必须 SP1） |
+| 程序完整性 | 18 个必需文件是否齐全 |
+| 目录权限 | 程序目录与数据目录是否可写，只读时实际落盘位置 |
+| 模块与存储 | 全部 lib 模块能否加载、二进制时序读写往返、**全新数据库初始化能否跑通** |
+| 外部工具 | PowerShell 版本、`collect.ps1` 实际执行结果、Ping 回环、磁盘可用空间 |
+| 端口 | 端口是否被占用、是否已有 WinMon 在运行 |
+| 下载锁定 | `.bat` / `node.exe` 是否带有下载标记（需右键 zip → 属性 → 解除锁定） |
+
+常见原因与处理：
+
+1. **解压到了 `Program Files` 或 C 盘根目录** —— 普通权限无法写入。v1.5.1 起会自动把数据与配置改存到 `%LOCALAPPDATA%\WinMon\data` 并在日志与报告中写明；更干净的做法是把整个目录移到 `D:\WinMon`。
+2. **Windows 7 未安装 SP1** —— 内置 Node 12 只支持 SP1 及以上。
+3. **32 位系统缺少 `runtime\node-x86.exe`** —— 请完整解压发布包，`pick-node.bat` 会自动选对位数。
+4. **zip 带下载锁定标记或杀毒软件拦截 `node.exe`** —— 解除锁定后重新解压，并把目录加入白名单。
+5. **端口被占用** —— 改 `config.json` 的 `server.port`。
+6. **服务在跑但界面打不开** —— Win7 自带的 IE11 无法运行本界面，见下文。
 
 ## Windows 7 支持
 
@@ -18,8 +45,11 @@ Win7 SP1（32 位与 64 位）可直接运行，无需额外安装补丁或运�
 | 项目 | 说明 |
 |------|------|
 | 运行时 | 内置 **Node.js 12.22.12**（最后一个支持 Win7 的 LTS）。`runtime/node.exe` 为 64 位，`runtime/node-x86.exe` 为 32 位，`pick-node.bat` 按系统位数自动选择 |
+| 启动脚本 | 全部 `.bat` 为纯 ASCII 且**不使用 `chcp 65001`** —— Win7 的 cmd.exe 切换代码页后会丢失批处理读取位置，导致脚本静默中断。中文只写入带 BOM 的报告文件 |
+| 后台启动 | `start-hidden.vbs` 不再创建目录、也不再用 `>>` 重定向（目录只读时会抛出被 `//B` 吞掉的错误，表现为「双击后什么都没发生」）。日志由 `server.js` 自己写入 |
 | 依赖库 | 不依赖 VC++ 运行库、.NET 4.x 或 PowerShell 3.0；HTTPS 使用 Node 自带的 OpenSSL 与 CA 证书，不受 Win7 系统 TLS 设置影响 |
 | 指标采集 | `lib/collect.ps1` 优先用 CIM，检测到 PowerShell 2.0 时自动回退 `Get-WmiObject`，并手工拼装 JSON（PS 2.0 无 `ConvertTo-Json`） |
+| Ping 解析 | 中文版 Windows 的 `ping.exe` 输出是 GBK，按 UTF-8 解码会让「时间=xx ms」变乱码。现取原始字节还原，只在含 `TTL=` 的应答行用纯 ASCII 模式取时延，中英文与 Linux 通用 |
 | 数据存储 | 纯 JS 存储引擎，不使用 `node:sqlite`（需 Node 22+）。**旧版 `data/monitor.db` 首次启动自动迁移**，见下文 |
 | 打包脚本 | `make-package.js` 用 Node 自带的 zlib 生成 zip，替代 Win7 上不存在的 `Compress-Archive` |
 | 浏览器 | Win7 最高可用 **Chrome 109.0.5414.120** 或 **Firefox 115 ESR**。**IE11 无法运行本界面** |
@@ -73,9 +103,12 @@ CPU、内存、磁盘、网络速率、进程数、运行时长。
 - `mail`：SMTP 邮件通知，含 `enabled`、`host`、`port`、`secure`（`ssl`/`starttls`/`none`）、`user`、`pass`、`from`、`to`（多个收件人用逗号分隔）。推荐直接在 Web「通知设置」中填写并发送测试邮件，密码仅保存于服务端 `config.json`，接口不回传明文。
 
 ## 设备存储与导入导出
-- 所有设备与历史数据保存在服务端目录的 **`data/`** 下（自带文件型存储引擎，无第三方依赖）：
+- 所有设备与历史数据保存在 **`data/`** 下（自带文件型存储引擎，无第三方依赖）。程序目录可写时为 `<程序目录>\data`；
+  程序目录只读（解压到 `Program Files` 或 C 盘根目录）时自动改用 **`%LOCALAPPDATA%\WinMon\data`**，`config.json` 同样改存到该目录。
+  实际路径会在启动日志与诊断报告中写明，也可用环境变量 `WINMON_DATA_DIR` 指定：
   - `data/store.json`：设备与配置（Agent 主机 `hosts`、探测设备 `targets` / `checks`、触发器 `triggers`、告警 `alerts`），原子写入（临时文件 + 重命名）。
   - `data/history/h<主机ID>/<指标>.bin`：历史指标，按主机与指标分文件的定长二进制序列（每条 16 字节：时间戳 + 数值），范围查询用二分查找，绘图自动降采样。文件名用十六进制编码，避免 `disk.used_pct[C:]` 这类指标名中的 `:` 在 Windows 上非法。
+  - `data/server.log`：运行日志，由服务端自己追加写入（UTF-8 带 BOM，Win7 记事本可直接阅读），带时间戳。
   - 备份/迁移直接复制整个 `data/` 目录即可（建议先停止服务）。
 - **从旧版 SQLite 自动迁移**：v1.4.0 及更早版本使用 `data/monitor.db`。升级后首次启动会自动读取该文件（含未落盘的 `-wal` 日志），把设备、触发器、告警与全部历史数据导入新引擎，随后把旧文件重命名为 `monitor.db.migrated` 保留备份，迁移只执行一次。迁移结果写入 `data/server.log`。
 - **批量导入/导出**：在「主机管理」页工具栏提供 `导入` / `导出` 按钮：
@@ -89,11 +122,13 @@ CPU、内存、磁盘、网络速率、进程数、运行时长。
 ```
 server.js        服务端（Web + API + 探测调度）
 agent.js         Agent 上报端
-lib/             采集 / 存储 / 告警 / 邮件通知 / SNMP / 数据库检测 / 探测引擎 / HTTP 客户端 / 打包
+preflight.js     启动自检 / 诊断（--quick / --full / --wait=N / --url）
+lib/             采集 / 存储 / 告警 / 邮件通知 / SNMP / 数据库检测 / 探测引擎 / HTTP 客户端 / 路径解析 / 打包
 public/          Web 前端（原生 JS + Canvas，无外部依赖；compat.js 为 ES5 浏览器兼容闸门）
 runtime/         内置 Node.js 运行时（Release 资产：node.exe / node-x86.exe / node-linux）
 pick-node.bat    按系统位数选择运行时
-*.bat / *.vbs    Windows 启动 / 停止 / 打包脚本
+diagnose.bat     生成中文诊断报告 data/diagnose.txt 并用记事本打开
+*.bat / *.vbs    Windows 启动 / 停止 / 打包脚本（纯 ASCII，不使用 chcp）
 make-package.js  纯 Node 打包器（server / agent / linux）
 agent.sh         Linux Agent 启动脚本
 ```

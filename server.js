@@ -7,13 +7,37 @@ const metrics = require('./lib/metrics');
 const alert = require('./lib/alert');
 const probe = require('./lib/probe');
 const mailer = require('./lib/mailer');
+const paths = require('./lib/paths');
 const { spawn } = require('child_process');
 
-const ROOT = __dirname;
-const VERSION = '1.5.0';
-const CONFIG_FILE = path.join(ROOT, 'config.json');
-const DATA_DIR = path.join(ROOT, 'data');
-const PUBLIC_DIR = path.join(ROOT, 'public');
+const ROOT = paths.ROOT;
+const VERSION = '1.5.1';
+const CONFIG_FILE = paths.CONFIG_FILE;
+const DATA_DIR = paths.DATA_DIR;
+const PUBLIC_DIR = paths.PUBLIC_DIR;
+
+// 隐藏窗口启动时进程没有可见控制台, 日志必须由自己落盘。
+// 旧版靠 cmd 的 ">> server.log" 重定向: 句柄被独占后重启写不进日志,
+// 而重定向本身失败(目录只读)时错误也随隐藏窗口一起消失。
+(function teeLog() {
+  let stream;
+  try {
+    // Win7 的记事本只有见到 BOM 才按 UTF-8 解码, 否则中文日志全是乱码。
+    const fresh = !fs.existsSync(paths.LOG_FILE) || fs.statSync(paths.LOG_FILE).size === 0;
+    stream = fs.createWriteStream(paths.LOG_FILE, { flags: 'a' });
+    if (fresh) stream.write('\ufeff');
+  } catch (e) { return; }
+  stream.on('error', () => {});
+  const util = require('util');
+  for (const kind of ['log', 'error', 'warn']) {
+    const orig = console[kind].bind(console);
+    console[kind] = function () {
+      const line = util.format.apply(null, arguments);
+      try { stream.write('[' + new Date().toLocaleString('zh-CN', { hour12: false }) + '] ' + line + '\n'); } catch (e) {}
+      orig.apply(null, arguments);
+    };
+  }
+})();
 
 const DEFAULT_CONFIG = {
   server: { host: '0.0.0.0', port: 8686, local_name: '', open_browser: true },
@@ -31,7 +55,7 @@ function loadConfig() {
     try { cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); }
     catch (e) { console.error('config.json 解析失败, 使用默认配置:', e.message); }
   } else {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2), 'utf8');
+    paths.writeQuiet(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2));
   }
   return {
     server: { ...DEFAULT_CONFIG.server, ...cfg.server },
@@ -45,15 +69,28 @@ function loadConfig() {
 }
 
 function saveConfig() {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8'); }
+  catch (e) { console.error('配置保存失败(' + (e.code || e.message) + '): ' + CONFIG_FILE); throw e; }
 }
 
+if (paths.redirected) {
+  console.log('[路径] 程序目录不可写(' + paths.error + '), 数据改存: ' + DATA_DIR);
+  console.log('[路径] 建议把整个 WinMon 目录移出 Program Files 或磁盘根目录, 例如 D:\\WinMon');
+}
 const cfg = loadConfig();
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-const db = new DB(path.join(DATA_DIR, 'monitor.db'));
+let dbFile = path.join(DATA_DIR, 'monitor.db');
+const legacyDb = path.join(ROOT, 'data', 'monitor.db');
+if (paths.redirected && fs.existsSync(legacyDb) && !fs.existsSync(dbFile)) {
+  // 数据目录已迁移到用户目录, 把旧库一并搬过去再走正常迁移流程。
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { fs.writeFileSync(dbFile + suffix, fs.readFileSync(legacyDb + suffix)); } catch (e) {}
+  }
+  console.log('[路径] 已将旧版 monitor.db 复制到新数据目录以便迁移');
+}
+const db = new DB(dbFile);
 db.seedTriggers();
 db.seedProbeTriggers();
-fs.writeFileSync(path.join(DATA_DIR, 'server.pid'), String(process.pid), 'utf8');
+paths.writeQuiet(paths.PID_FILE, String(process.pid));
 
 const startedAt = Date.now();
 const MIME = {
@@ -501,26 +538,19 @@ function shutdown() {
 
 function restart() {
   console.log('\n正在重启服务...');
-  let logFd = null;
-  try { logFd = fs.openSync(path.join(DATA_DIR, 'server.log'), 'a'); } catch (e) {
-    // 日志文件可能被启动时的重定向句柄独占, 此时继承父进程的 stdout/stderr,
-    // 否则新进程的输出会被丢弃, 重启后再无任何日志可查。
-    console.error('[重启] 无法打开日志文件(' + e.code + '), 改为继承当前输出句柄');
-  }
-  const out = logFd == null ? 1 : logFd;
-  const err = logFd == null ? 2 : logFd;
   try {
+    // 新进程会自己把日志写入 server.log, 这里不再传日志句柄,
+    // 避免与父进程持有的追加句柄相互独占。
     const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
       cwd: ROOT,
       detached: true,
-      stdio: ['ignore', out, err],
+      stdio: 'ignore',
       env: { ...process.env, WINMON_RESTART_CHILD: '1' },
     });
     child.unref();
     console.log(`[重启] 已拉起新进程 PID=${child.pid}, 旧进程即将退出`);
   } catch (e) {
     console.error('[重启] 拉起新进程失败, 保持当前进程运行:', e.message);
-    if (logFd != null) { try { fs.closeSync(logFd); } catch {} }
     return;
   }
   if (logFd != null) { try { fs.closeSync(logFd); } catch {} }

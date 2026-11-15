@@ -1,5 +1,4 @@
 @echo off
-chcp 65001 >nul
 cd /d "%~dp0"
 call pick-node.bat
 echo Packaging Agent deployment bundle (includes x64 + x86 runtime, may take ~1 min)...

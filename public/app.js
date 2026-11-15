@@ -423,6 +423,18 @@ async function renderProbes() {
         浏览器: Chrome 87+ / Edge 87+ / Firefox 78+。Windows 7 上可用 <b>Chrome 109</b> 或 <b>Firefox 115 ESR</b>;
         IE11 无法运行本界面, 请改用上述浏览器或从局域网内其它设备访问。
       </div>
+    </div>
+    <div class="panel">
+      <h2>启动不了怎么办</h2>
+      <div class="hint">
+        1. 双击服务端目录的 <b>diagnose.bat</b>, 会生成中文诊断报告 <b>data\\diagnose.txt</b> 并自动打开,
+        逐项检查运行时、目录权限、存储、PowerShell、采集脚本、Ping 与端口;<br>
+        2. 双击 <b>start-console.bat</b> 以前台方式运行, 报错会直接留在窗口里 (后台启动失败时 start.bat 也会自动转到前台);<br>
+        3. 把整个目录放在 <b>D:\\WinMon</b> 这类可写位置。放在「Program Files」或 C 盘根目录时程序目录只读,
+        数据与配置会自动改存到 <b>%LOCALAPPDATA%\\WinMon\\data</b>, 诊断报告里会写明实际路径;<br>
+        4. Windows 7 需已安装 <b>SP1</b>; 32 位系统需要 <b>runtime\\node-x86.exe</b>, 请完整解压发布包;<br>
+        5. 右键 zip → 属性 → <b>解除锁定</b>后再解压, 并确认杀毒软件没有拦截 node.exe。
+      </div>
     </div>`;
   const updateProbeBulk = () => {
     const n = state.selProbes.size;
