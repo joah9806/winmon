@@ -11,7 +11,7 @@ const paths = require('./lib/paths');
 const { spawn } = require('child_process');
 
 const ROOT = paths.ROOT;
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 const CONFIG_FILE = paths.CONFIG_FILE;
 const DATA_DIR = paths.DATA_DIR;
 const PUBLIC_DIR = paths.PUBLIC_DIR;
@@ -69,6 +69,8 @@ if (paths.redirected && fs.existsSync(legacyDb) && !fs.existsSync(dbFile)) {
 const db = new DB(dbFile);
 db.seedTriggers();
 db.seedProbeTriggers();
+const exampleCount = db.seedExampleTargets();
+if (exampleCount) console.log('[初始化] 已内置 ' + exampleCount + ' 个设备示例模板(默认停用), 可在主机管理导出参照后删除');
 paths.writeQuiet(paths.PID_FILE, String(process.pid));
 
 const startedAt = Date.now();
@@ -285,6 +287,10 @@ const server = http.createServer(async (req, res) => {
         const h = db.getHost(id);
         if (!h) return json(res, 404, { error: '主机不存在' });
         const b = await readBody(req);
+        if (b.alert_muted != null) {
+          const r = db.setHostMuted(id, !!b.alert_muted, Date.now());
+          return json(res, 200, { ok: true, alert_muted: r.muted, resolved: r.resolved });
+        }
         const patch = {};
         if (b.name != null) {
           const name = String(b.name).trim().slice(0, 128);

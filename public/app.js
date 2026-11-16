@@ -7,7 +7,16 @@ const state = {
   alertsMode: 'active', triggers: [], hosts: [], catalog: null, modalOpen: false,
   probeSearch: '', _restoreSearch: false,
   selProbes: new Set(),
+  collapsed: loadCollapsed(),
 };
+
+function loadCollapsed() {
+  try { return new Set(JSON.parse(localStorage.getItem('winmon-collapsed') || '[]')); }
+  catch (e) { return new Set(); }
+}
+function saveCollapsed() {
+  try { localStorage.setItem('winmon-collapsed', JSON.stringify([...state.collapsed])); } catch (e) {}
+}
 
 const DEVICE_TYPE_NAMES = { camera: '摄像机', switch: '交换机', firewall: '防火墙', controller: '设备控制器', linux: 'Linux服务器', windows: 'Windows电脑', db: '数据库服务器', network: '网络链路', app: '应用服务', other: '其他' };
 const TYPE_COLORS = { camera: '#4f8cff', switch: '#2ecc71', firewall: '#ff5c5c', controller: '#ffa940', linux: '#9b8cff', windows: '#3fb6e8', db: '#e879b9', network: '#5ad1c9', app: '#c9d14f', other: '#8493b8' };
@@ -290,22 +299,30 @@ async function renderDashboard() {
     [hosts, stats] = await Promise.all([api('/api/hosts'), api('/api/stats')]);
   } catch (e) { main.innerHTML = `<div class="empty">加载失败: ${esc(e.message)}</div>`; return; }
   state.hosts = hosts;
-  const online = hosts.filter(h => h.online).length;
+  // 已忽略告警的设备不在概览出现; 有活动告警的排在最前面。
+  const shown = hosts.filter(h => !h.alert_muted);
+  const mutedCount = hosts.length - shown.length;
+  const ordered = shown.slice().sort((a, b) => (b.alerts || 0) - (a.alerts || 0) || a.id - b.id);
+  const online = shown.filter(h => h.online).length;
+  const empty = mutedCount && !shown.length
+    ? '<div class="empty">所有设备都已忽略告警, 不在概览显示。到「主机管理」可恢复。</div>'
+    : '<div class="empty">暂无主机, 等待 Agent 上报...</div>';
   main.innerHTML = `
     <div class="summary">
-      <div class="stat"><div class="v">${hosts.length}</div><div class="k">主机总数</div></div>
+      <div class="stat"><div class="v">${shown.length}</div><div class="k">主机总数</div></div>
       <div class="stat"><div class="v" style="color:var(--green)">${online}</div><div class="k">在线</div></div>
-      <div class="stat ${hosts.length - online > 0 ? 'bad' : ''}"><div class="v">${hosts.length - online}</div><div class="k">离线</div></div>
+      <div class="stat ${shown.length - online > 0 ? 'bad' : ''}"><div class="v">${shown.length - online}</div><div class="k">离线</div></div>
       <div class="stat ${stats.active_alerts > 0 ? 'bad' : ''}"><div class="v">${stats.active_alerts}</div><div class="k">活动告警</div></div>
       <div class="stat"><div class="v">${(stats.points / 10000).toFixed(1)}万</div><div class="k">历史数据点</div></div>
+      ${mutedCount ? `<div class="stat"><div class="v">${mutedCount}</div><div class="k">已忽略告警(不显示)</div></div>` : ''}
     </div>
-    <div class="grid">${hosts.map(hostCard).join('') || '<div class="empty">暂无主机, 等待 Agent 上报...</div>'}</div>`;
+    <div class="grid">${ordered.map(hostCard).join('') || empty}</div>`;
   main.querySelectorAll('.card').forEach(c => c.onclick = () => openHost(Number(c.dataset.id)));
 }
 
 function hostCard(h) {
   if (h.kind === 'probe') return probeCard(h);
-  return `<div class="card" data-id="${h.id}">
+  return `<div class="card${h.alerts > 0 ? ' alerting' : ''}" data-id="${h.id}">
     <div class="title"><span class="dot ${h.online ? 'on' : 'off'}"></span><b>${esc(h.name)}</b>
       ${h.alerts > 0 ? `<span class="badge">${h.alerts} 条告警</span>` : '<span class="badge ok">正常</span>'}</div>
     <div class="sub">${esc(h.ip || '-')} · ${esc(h.os || '-')}</div>
@@ -331,13 +348,18 @@ function probeCard(h) {
   if (h.db_ok != null) rows.push(['数据库', h.db_ok ? '连接正常' : '连接失败']);
   if (h.http_ok != null) rows.push(['HTTP', h.http_ok ? '正常' : '异常']);
   if (h.snmp_in != null || h.snmp_out != null) rows.push(['带宽', `↓${fmtBytes(h.snmp_in)}/s ↑${fmtBytes(h.snmp_out)}/s`]);
-  return `<div class="card" data-id="${h.id}">
+  return `<div class="card${h.alerts > 0 ? ' alerting' : ''}" data-id="${h.id}">
     <div class="title"><span class="dot ${st.ok ? 'on' : 'off'}"></span><b>${esc(h.name)}</b>
       ${h.alerts > 0 ? `<span class="badge">${h.alerts} 条告警</span>` : (st.ok ? '<span class="badge ok">正常</span>' : '<span class="badge">异常</span>')}</div>
     <div class="sub">${esc(h.ip || '-')} · ${esc(DEVICE_TYPE_NAMES[h.dtype] || h.dtype || '设备')}</div>
     ${rows.map(([k, v]) => `<div class="meter"><div class="lab"><span>${esc(k)}</span><b>${esc(v)}</b></div></div>`).join('')}
     <div class="foot"><span>最后探测: ${fmtAgo(h.last_seen)}</span></div>
   </div>`;
+}
+
+function groupRow(key, type, count, colspan, fold) {
+  const color = TYPE_COLORS[type] || TYPE_COLORS.other;
+  return `<tr class="group-row" data-grp="${key}" title="点击折叠/展开"><td colspan="${colspan}"><span class="grp-caret">${fold ? '▸' : '▾'}</span><span class="grp-mark" style="background:${color}"></span>${esc(DEVICE_TYPE_NAMES[type] || type)}<span class="grp-count">${count}</span></td></tr>`;
 }
 
 async function renderProbes() {
@@ -360,14 +382,15 @@ async function renderProbes() {
   for (const k of typeOrder) {
     const list = groups[k].sort((a, b) =>
       ipKey(a.address) - ipKey(b.address) || String(a.address).localeCompare(String(b.address)) || a.name.localeCompare(b.name));
-    const color = TYPE_COLORS[k] || TYPE_COLORS.other;
-    rowsHtml += `<tr class="group-row"><td colspan="10"><span class="grp-mark" style="background:${color}"></span>${esc(DEVICE_TYPE_NAMES[k] || k)}<span class="grp-count">${list.length}</span></td></tr>`;
+    const gkey = 'probe:' + k;
+    const fold = !q && state.collapsed.has(gkey);
+    rowsHtml += groupRow(gkey, k, list.length, 10, fold);
     for (const t of list) {
       const h = hmap['probe:' + t.id];
       const st = h ? probeStatus(h) : { ok: true };
-      rowsHtml += `<tr>
+      rowsHtml += `<tr data-grp-row="${gkey}"${fold ? ' style="display:none"' : ''}>
         <td><input type="checkbox" class="row-sel" data-sel="${t.id}" ${state.selProbes.has(t.id) ? 'checked' : ''}></td>
-        <td><b>${esc(t.name)}</b></td>
+        <td><b title="${esc(t.note || '')}">${esc(t.name)}</b>${h && h.alert_muted ? ' <span class="hint">(已忽略告警)</span>' : ''}</td>
         <td>${esc(DEVICE_TYPE_NAMES[t.type] || t.type)}</td>
         <td>${esc(t.address)}</td>
         <td>${t.checks.map(c => CHECK_NAMES[c.kind] || c.kind).join(' + ')}</td>
@@ -378,6 +401,7 @@ async function renderProbes() {
         <td style="white-space:nowrap">
           <button class="btn ghost sm" data-test="${t.id}">测试</button>
           <button class="btn ghost sm" data-edit="${t.id}">编辑</button>
+          ${h ? `<button class="btn ghost sm" data-mute="${h.id}" data-m="${h.alert_muted ? 1 : 0}">${h.alert_muted ? '恢复告警' : '忽略告警'}</button>` : ''}
           <button class="btn danger sm" data-del="${t.id}">删除</button>
         </td>
       </tr>`;
@@ -397,11 +421,12 @@ async function renderProbes() {
   for (const k of aTypeOrder) {
     const list = agroups[k].sort((a, b) =>
       ipKey(a.ip) - ipKey(b.ip) || String(a.ip).localeCompare(String(b.ip)) || a.name.localeCompare(b.name));
-    const color = TYPE_COLORS[k] || TYPE_COLORS.other;
-    agentRowsHtml += `<tr class="group-row"><td colspan="8"><span class="grp-mark" style="background:${color}"></span>${esc(DEVICE_TYPE_NAMES[k] || k)}<span class="grp-count">${list.length}</span></td></tr>`;
+    const gkey = 'agent:' + k;
+    const fold = !q && state.collapsed.has(gkey);
+    agentRowsHtml += groupRow(gkey, k, list.length, 8, fold);
     for (const h of list) {
-      agentRowsHtml += `<tr>
-        <td><b>${esc(h.name)}</b>${h.name_custom ? '' : ' <span class="hint">(自动)</span>'}</td>
+      agentRowsHtml += `<tr data-grp-row="${gkey}"${fold ? ' style="display:none"' : ''}>
+        <td><b>${esc(h.name)}</b>${h.name_custom ? '' : ' <span class="hint">(自动)</span>'}${h.alert_muted ? ' <span class="hint">(已忽略告警)</span>' : ''}</td>
         <td>${esc(DEVICE_TYPE_NAMES[h.dtype] || h.dtype || '未分类')}</td>
         <td>${esc(h.ip || '-')}</td>
         <td>${esc(h.host_key)}</td>
@@ -411,6 +436,7 @@ async function renderProbes() {
         <td style="white-space:nowrap">
           <button class="btn ghost sm" data-hedit="${h.id}">改名/类型</button>
           <button class="btn ghost sm" data-hview="${h.id}">详情</button>
+          <button class="btn ghost sm" data-mute="${h.id}" data-m="${h.alert_muted ? 1 : 0}">${h.alert_muted ? '恢复告警' : '忽略告警'}</button>
           <button class="btn danger sm" data-hdel="${h.id}">删除</button>
         </td>
       </tr>`;
@@ -425,8 +451,9 @@ async function renderProbes() {
       <button class="btn ghost" id="expTargets">导出</button>
       <input type="text" id="probeSearch" placeholder="搜索名称 / IP地址" style="width:220px" value="${esc(state.probeSearch)}">
       <div class="spacer"></div>
-      <span class="hint">探测设备 ${targets.length} 台 · Agent 主机 ${agentAll.length} 台${q ? ` · 匹配 ${filtered.length + agentFiltered.length} 台` : ''} · 按类型分组 · IP 排序</span>
+      <span class="hint">探测设备 ${targets.length} 台 · Agent 主机 ${agentAll.length} 台${q ? ` · 匹配 ${filtered.length + agentFiltered.length} 台` : ''} · 按类型分组(点标题折叠) · IP 排序</span>
     </div>
+    ${targets.some(t => t.name.startsWith('示例-')) ? '<div class="hint" style="margin:-4px 0 12px">已内置每种设备类型的示例模板(名称以「示例-」开头, <b>默认停用</b>, 不会去探测这些地址)。点「导出」即可拿到各类型的填写参照; 改成真实地址后启用, 或直接删除。</div>' : ''}
     <div class="toolbar" id="probeBulk" style="display:none">
       <span class="hint">已选 <b id="probeSelCount">0</b> 项</span>
       <button class="btn ghost sm" id="bulkEditProbes">批量修改</button>
@@ -566,6 +593,15 @@ async function renderProbes() {
       toast('已删除'); renderProbes();
     });
   });
+  main.querySelectorAll('[data-grp]').forEach(row => row.onclick = () => {
+    const key = row.dataset.grp;
+    const fold = !state.collapsed.has(key);
+    fold ? state.collapsed.add(key) : state.collapsed.delete(key);
+    saveCollapsed();
+    row.querySelector('.grp-caret').textContent = fold ? '▸' : '▾';
+    main.querySelectorAll('[data-grp-row="' + key + '"]').forEach(r => { r.style.display = fold ? 'none' : ''; });
+  });
+  bindMuteButtons(renderProbes);
   if (state._restoreSearch) {
     state._restoreSearch = false;
     search.focus();
@@ -606,6 +642,23 @@ function bulkEditProbes(targets) {
     toast(fail ? `已修改 ${sel.length - fail} 个, ${fail} 个失败` : `已修改 ${sel.length} 个目标`, !!fail);
     renderProbes();
   };
+}
+
+function bindMuteButtons(done) {
+  main.querySelectorAll('[data-mute]').forEach(b => b.onclick = async () => {
+    const id = Number(b.dataset.mute);
+    const next = b.dataset.m !== '1';
+    try {
+      const r = await api('/api/host?id=' + id, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alert_muted: next }),
+      });
+      toast(next
+        ? (r.resolved ? `已忽略该设备告警, 同时关闭 ${r.resolved} 条活动告警` : '已忽略该设备告警, 不再产生新告警')
+        : '已恢复该设备告警');
+      done();
+    } catch (e) { toast(e.message, true); }
+  });
 }
 
 function hostEditModal(h, done) {
@@ -710,9 +763,10 @@ async function renderHost() {
     <div class="detail-head">
       <button class="btn ghost sm" id="backBtn">← 返回概览</button>
       <h2><span class="dot ${h.online ? 'on' : 'off'}"></span> ${esc(h.name)}</h2>
-      ${h.alerts > 0 ? `<span class="badge">${h.alerts} 条活动告警</span>` : '<span class="badge ok">正常</span>'}
+      ${h.alert_muted ? '<span class="badge muted">已忽略告警</span>' : (h.alerts > 0 ? `<span class="badge">${h.alerts} 条活动告警</span>` : '<span class="badge ok">正常</span>')}
       <div class="spacer"></div>
       <button class="btn ghost sm" id="editHostBtn">改名/类型</button>
+      <button class="btn ghost sm" id="muteHostBtn">${h.alert_muted ? '恢复告警' : '忽略告警'}</button>
       ${h.kind === 'probe' ? '<button class="btn ghost sm" id="cfgHostBtn">探测配置</button>' : ''}
       <button class="btn danger sm" id="delHostBtn">删除主机</button>
     </div>
@@ -723,6 +777,7 @@ async function renderHost() {
       <div>CPU: <b>${esc(h.cpu || '-')}</b></div>
       <div>首次接入: <b>${fmtTime(h.first_seen)}</b></div>
       <div>最后上报: <b>${fmtTime(h.last_seen)}</b></div>
+      <div>告警: <b>${h.alert_muted ? '已忽略(不再产生新告警)' : '正常监控'}</b></div>
     </div></div>
     <div class="panel">
       <div class="toolbar">
@@ -743,6 +798,19 @@ async function renderHost() {
     </div>`;
   $('#backBtn').onclick = () => { state.view = 'dashboard'; syncNav(); render(); };
   $('#editHostBtn').onclick = () => hostEditModal(h, renderHost);
+  $('#muteHostBtn').onclick = async () => {
+    const next = !h.alert_muted;
+    try {
+      const r = await api('/api/host?id=' + h.id, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alert_muted: next }),
+      });
+      toast(next
+        ? (r.resolved ? `已忽略告警, 同时关闭 ${r.resolved} 条活动告警` : '已忽略该设备告警')
+        : '已恢复该设备告警');
+      renderHost();
+    } catch (e) { toast(e.message, true); }
+  };
   if (h.kind === 'probe') {
     $('#cfgHostBtn').onclick = async () => {
       const tid = Number(String(h.host_key).slice(6));
@@ -920,7 +988,7 @@ async function renderAlerts() {
       <table><thead><tr><th>级别</th><th>主机</th><th>触发器</th><th>告警内容</th><th>当前值</th><th>开始时间</th><th>状态</th><th>恢复时间</th></tr></thead>
       <tbody>${alerts.map(a => `<tr>
         <td>${sevBadge(a.severity)}</td>
-        <td>${esc(a.host_name || '-')}</td>
+        <td>${esc(a.host_name || '-')}${a.host_muted ? ' <span class="hint">(已忽略)</span>' : ''}</td>
         <td>${esc(a.trigger_name || (a.trigger_id === 0 ? '主机离线' : '-'))}</td>
         <td style="max-width:420px">${esc(a.message)}</td>
         <td>${a.item ? fmtVal(a.item, a.value) : '-'}</td>

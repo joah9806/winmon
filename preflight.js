@@ -163,7 +163,7 @@ function checkInstall() {
     rec('FAIL', 'Storage engine failed', ascii(e.message), 'Check antivirus / folder permissions on the data directory.');
   }
 
-  // 全新安装时 seedTriggers / seedProbeTriggers 必须能跑通, 否则服务启动即崩。
+  // 全新安装时 seedTriggers / seedProbeTriggers / seedExampleTargets 必须能跑通, 否则服务启动即崩。
   try {
     const DB = require(path.join(ROOT, 'lib', 'db.js'));
     const t = path.join(dataDir, '.preflight-db');
@@ -171,11 +171,13 @@ function checkInstall() {
     const db = new DB(path.join(t, 'monitor.db'));
     db.seedTriggers();
     db.seedProbeTriggers();
+    const examples = db.seedExampleTargets();
     const n = db.getTriggers().length;
     db.close();
     require(path.join(ROOT, 'lib', 'store.js')).rimraf(t);
     if (n < 9) throw new Error('expected 9 default triggers, got ' + n);
-    rec('OK', 'Fresh database seeding', n + ' default triggers created');
+    if (examples !== 10) throw new Error('expected 10 example targets, got ' + examples);
+    rec('OK', 'Fresh database seeding', n + ' default triggers, ' + examples + ' example devices');
   } catch (e) {
     rec('FAIL', 'Fresh database seeding', ascii(e.message), 'A fresh install would fail to start. Re-extract the release zip.');
   }
