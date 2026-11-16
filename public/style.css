@@ -193,6 +193,19 @@ canvas.chart { width: 100%; height: 300px; display: block; }
 }
 .switch input:checked + i { background: rgba(46,204,113,.25); border-color: var(--green); }
 .switch input:checked + i:before { transform: translateX(16px); background: var(--green); }
+.drop-zone {
+  border: 2px dashed var(--border); border-radius: 10px; padding: 30px 16px; text-align: center;
+  cursor: pointer; margin: 12px 0; transition: border-color .15s, background .15s;
+}
+.drop-zone:hover, .drop-zone.over { border-color: var(--accent); background: rgba(79,140,255,.07); }
+.drop-zone .dz-main { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+.drop-zone .dz-sub { color: var(--muted); font-size: 12px; }
+.drop-mask {
+  position: fixed; inset: 0; z-index: 150; display: none; align-items: center; justify-content: center;
+  background: rgba(79,140,255,.12); border: 3px dashed var(--accent); color: var(--accent);
+  font-size: 18px; font-weight: 600; pointer-events: none;
+}
+.drop-mask.show { display: flex; }
 @media (max-width: 760px) {
   header { flex-wrap: wrap; height: auto; padding: 10px 14px; gap: 10px; }
   main { padding: 14px; }

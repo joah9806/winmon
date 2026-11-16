@@ -116,9 +116,10 @@ function checkRuntime() {
 }
 
 // ---------- files / permissions / modules / storage ----------
-const REQUIRED = ['server.js', 'agent.js', 'config.json',
+const REQUIRED = ['server.js', 'agent.js', 'config.json', 'upgrade-helper.js',
   'lib/paths.js', 'lib/log.js', 'lib/db.js', 'lib/store.js', 'lib/metrics.js', 'lib/alert.js', 'lib/probe.js',
   'lib/mailer.js', 'lib/httpc.js', 'lib/snmp.js', 'lib/dbcheck.js', 'lib/collect.ps1',
+  'lib/unzip.js', 'lib/upgrade.js',
   'public/index.html', 'public/app.js', 'public/compat.js', 'public/style.css'];
 
 function checkInstall() {
@@ -138,7 +139,7 @@ function checkInstall() {
   if (!paths.rootWritable) rec('WARN', 'Config redirected', 'config.json will be saved to ' + ascii(paths.CONFIG_FILE), 'Move the folder to a writable location such as D:\\WinMon.');
   else rec('OK', 'Application folder writable', 'config: ' + ascii(paths.CONFIG_FILE));
 
-  const libs = ['paths', 'store', 'sqlite-import', 'db', 'metrics', 'httpc', 'alert', 'mailer', 'probe', 'snmp', 'dbcheck', 'mkzip'];
+  const libs = ['paths', 'store', 'sqlite-import', 'db', 'metrics', 'httpc', 'alert', 'mailer', 'probe', 'snmp', 'dbcheck', 'mkzip', 'unzip', 'upgrade'];
   const errs = [];
   for (const l of libs) {
     try { require(path.join(ROOT, 'lib', l + '.js')); }
@@ -180,6 +181,36 @@ function checkInstall() {
     rec('OK', 'Fresh database seeding', n + ' default triggers, ' + examples + ' example devices');
   } catch (e) {
     rec('FAIL', 'Fresh database seeding', ascii(e.message), 'A fresh install would fail to start. Re-extract the release zip.');
+  }
+
+  // 在线升级依赖自制 ZIP 读取器, 这里做一次真实的打包 -> 解包往返,
+  // 并确认 ../ 路径穿越会被拒绝。
+  try {
+    const { mkdirp, rimraf: rm } = require(path.join(ROOT, 'lib', 'store.js'));
+    const mkzip = require(path.join(ROOT, 'lib', 'mkzip.js'));
+    const unzip = require(path.join(ROOT, 'lib', 'unzip.js'));
+    const t = path.join(dataDir, '.preflight-zip');
+    rm(t);
+    mkdirp(path.join(t, 'out'));
+    const z = path.join(t, 't.zip');
+    fs.writeFileSync(z, mkzip.build([
+      { name: 'VERSION', data: Buffer.from('9.9.9\n') },
+      { name: 'lib/a.txt', data: Buffer.from('hello 中文') },
+    ]));
+    const files = unzip.extract(z, path.join(t, 'out'));
+    const body = fs.readFileSync(path.join(t, 'out', 'lib', 'a.txt'), 'utf8');
+    let blocked = false;
+    try {
+      const bad = path.join(t, 'bad.zip');
+      fs.writeFileSync(bad, mkzip.build([{ name: '../evil.txt', data: Buffer.from('x') }]));
+      unzip.extract(bad, path.join(t, 'out'));
+    } catch (e2) { blocked = true; }
+    rm(t);
+    if (files.length !== 2 || body !== 'hello 中文') throw new Error('round-trip mismatch');
+    if (!blocked) throw new Error('path traversal was not rejected');
+    rec('OK', 'Upgrade package unpack', 'zip round-trip OK, unsafe paths rejected');
+  } catch (e) {
+    rec('FAIL', 'Upgrade package unpack', ascii(e.message), 'Online upgrade would not work. Re-extract the release zip.');
   }
 
   if (configError) rec('FAIL', 'config.json is invalid JSON', ascii(configError), 'Delete config.json to regenerate defaults, or fix the syntax.');

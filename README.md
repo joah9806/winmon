@@ -4,7 +4,7 @@
 
 ## 快速开始
 
-1. 到 [Releases](../../releases) 下载 `winmon-server-windows.zip`。
+1. 到 [Releases](../../releases) 下载 `winmon-server-windows-v1.8.0.zip`（文件名带版本号，请以 Releases 页最新版本为准）。
 2. 解压到**可写目录**（推荐 `D:\WinMon`，不要放在 `Program Files` 或 C 盘根目录），双击 `start.bat`。
 3. 启动器会先做一遍环境自检，通过后后台启动服务并确认接口已响应，浏览器自动打开 `http://127.0.0.1:8686`。
 
@@ -14,6 +14,17 @@
 停止服务：双击 `stop.bat`，或点 Web 界面右上角「停止服务」。重启服务：点右上角「重启服务」（短暂中断后自动恢复，页面自动刷新）。后台运行日志见 `data/server.log`。
 如需前台控制台调试，用 `start-console.bat`。
 
+### 在线升级
+
+v1.8.0 起可直接在网页里升级：把新版服务端包（`winmon-server-windows-v*.zip`）**拖到页面任意位置**，或点右上角「升级」选择文件。页面会显示上传进度，校验通过后显示「当前 vX → 新版本 vY」，点「立即升级」即自动替换程序文件并重启，服务恢复后页面自动刷新。
+
+- 升级保留设备、历史数据与 `config.json`（自定义端口等设置不变），只替换程序文件。
+- 只接受**高于当前版本**的完整服务端包；同版本或更低会被拒绝，解包校验失败也不会改动任何程序文件。
+- 只允许本机（127.0.0.1）操作；程序目录不可写时会提示先把整个目录移到可写位置。
+- 接管与替换日志在 `data\upgrade-helper.log`；`data\upgrade` 是临时目录，下次启动自动清理。
+- **从 v1.7.0 及更早版本升到 v1.8.0 需要手动一次**：下载新包解压覆盖原目录（保留 `config.json` 与 `data`），之后即可在线升级。
+- 升级中途断电等意外：先看 `data\upgrade-helper.log`，仍起不来就双击 `start.bat`；数据目录不受升级影响。
+
 ## 启动不了怎么办
 
 双击 **`diagnose.bat`**，它会逐项检查并生成中文报告 `data/diagnose.txt`（UTF-8 带 BOM，Win7 记事本可正常显示）并自动打开：
@@ -22,7 +33,7 @@
 |--------|------|
 | 运行时 | Node 版本与位数、`node.exe` / `node-x86.exe` 是否存在且完整、与系统位数是否匹配 |
 | 系统 | Windows 版本与是否安装 SP1（Win7 必须 SP1） |
-| 程序完整性 | 18 个必需文件是否齐全 |
+| 程序完整性 | 22 个必需文件是否齐全 |
 | 目录权限 | 程序目录与数据目录是否可写，只读时实际落盘位置 |
 | 模块与存储 | 全部 lib 模块能否加载、二进制时序读写往返、**全新数据库初始化能否跑通** |
 | 外部工具 | PowerShell 版本、`collect.ps1` 实际执行结果、Ping 回环、磁盘可用空间 |
@@ -75,7 +86,7 @@ Win7 SP1（32 位与 64 位）可直接运行，无需额外安装补丁或运�
 ### 1. Agent 采集（服务器 / 电脑深度指标）
 CPU、内存、磁盘、网络速率、进程数、运行时长。
 
-- **Windows**（7 SP1 / 8.1 / 10 / 11，32 位或 64 位）：下载 `agent-windows.zip`，解压后修改 `config.json` 中 `agent.server_url` 指向服务端（可一并设 `agent.name` 作为显示名称），然后：
+- **Windows**（7 SP1 / 8.1 / 10 / 11，32 位或 64 位）：下载 `agent-windows-v1.8.0.zip`，解压后修改 `config.json` 中 `agent.server_url` 指向服务端（可一并设 `agent.name` 作为显示名称），然后：
 
   | 脚本 | 行为 |
   |------|------|
@@ -86,7 +97,7 @@ CPU、内存、磁盘、网络速率、进程数、运行时长。
 
   日志写 `data/agent.log`（UTF-8 带 BOM）。重复启动会被拦下并提示已运行的 PID，不会跑出两个 Agent。
   开机自启：把 `agent-background.bat` 的快捷方式放进 `shell:startup`。
-- **Linux**：下载 `agent-linux.zip`（内置 Linux Node，基于 `/proc` 采集），解压后：
+- **Linux**：下载 `agent-linux-v1.8.0.zip`（内置 Linux Node，基于 `/proc` 采集），解压后：
   ```sh
   chmod +x runtime/node agent.sh
   ./agent.sh                      # 前台
@@ -146,9 +157,10 @@ CPU、内存、磁盘、网络速率、进程数、运行时长。
 ```
 server.js        服务端（Web + API + 探测调度）
 agent.js         Agent 上报端（--status 查状态 / --stop 停止）
+upgrade-helper.js 在线升级接管进程（旧进程退出后替换文件并拉起新版）
 preflight.js     启动自检 / 诊断（--quick / --full / --wait=N / --url）
 CONFIG.md        服务端与 Agent 完整配置文档
-lib/             采集 / 存储 / 告警 / 邮件通知 / SNMP / 数据库检测 / 探测引擎 / HTTP 客户端 / 路径解析 / 日志 / 打包
+lib/             采集 / 存储 / 告警 / 邮件通知 / SNMP / 数据库检测 / 探测引擎 / HTTP 客户端 / 路径解析 / 日志 / 打包 / 解包 / 在线升级
 public/          Web 前端（原生 JS + Canvas，无外部依赖；compat.js 为 ES5 浏览器兼容闸门）
 runtime/         内置 Node.js 运行时（Release 资产：node.exe / node-x86.exe / node-linux）
 pick-node.bat    按系统位数选择运行时
@@ -161,10 +173,10 @@ agent.sh         Linux Agent 启动脚本
 ```
 
 ## 从源码打包
-- Windows Agent：`make-agent.bat` → `agent-package.zip`（同时生成 Release 用的 `agent-windows.zip`）
-- Linux Agent：`make-agent-linux.bat` → `agent-linux.zip`
-- 完整服务端：`make-server.bat` → `winmon-server-windows.zip`
+- Windows Agent：`make-agent.bat` → `agent-windows-v<版本>.zip`（同时生成固定名 `agent-package.zip` 供页面下载）
+- Linux Agent：`make-agent-linux.bat` → `agent-linux-v<版本>.zip`
+- 完整服务端：`make-server.bat` → `winmon-server-windows-v<版本>.zip`（包内附 `VERSION` 文件，版本号取自 `server.js`）
 - 也可直接 `node make-package.js all` 一次生成全部资产。
 
 ## 技术栈
-Node.js 12.22.12（Win7 兼容，自带 OpenSSL）、原生 HTTP/UDP/TCP、自实现文件型存储引擎（JSON 元数据 + 定长二进制时序）、自实现 ZIP 写入（zlib）、PowerShell CIM / WMI（Windows 指标）、`/proc`（Linux 指标）、自实现 SNMP BER 编解码与 MySQL/SQL Server/Redis wire 协议。前端为原生 JS + Canvas，需 Chrome 87+ / Edge 87+ / Firefox 78+。
+Node.js 12.22.12（Win7 兼容，自带 OpenSSL）、原生 HTTP/UDP/TCP、自实现文件型存储引擎（JSON 元数据 + 定长二进制时序）、自实现 ZIP 读写（zlib）、PowerShell CIM / WMI（Windows 指标）、`/proc`（Linux 指标）、自实现 SNMP BER 编解码与 MySQL/SQL Server/Redis wire 协议。前端为原生 JS + Canvas，需 Chrome 87+ / Edge 87+ / Firefox 78+。

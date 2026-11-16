@@ -8,10 +8,12 @@ const alert = require('./lib/alert');
 const probe = require('./lib/probe');
 const mailer = require('./lib/mailer');
 const paths = require('./lib/paths');
+const upgrade = require('./lib/upgrade');
+const { mkdirp } = require('./lib/store');
 const { spawn } = require('child_process');
 
 const ROOT = paths.ROOT;
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 const CONFIG_FILE = paths.CONFIG_FILE;
 const DATA_DIR = paths.DATA_DIR;
 const PUBLIC_DIR = paths.PUBLIC_DIR;
@@ -73,6 +75,19 @@ const exampleCount = db.seedExampleTargets();
 if (exampleCount) console.log('[初始化] 已内置 ' + exampleCount + ' 个设备示例模板(默认停用), 可在主机管理导出参照后删除');
 paths.writeQuiet(paths.PID_FILE, String(process.pid));
 
+// 在线升级留下的临时文件在下次启动时清理; 升级进程可能还没退出, 删不掉就晚点再试。
+// 有包正在上传或已校验待应用时不动目录, 否则会把用户刚传上来的包删掉。
+let pendingUpgrade = null;
+let uploadBusy = false;
+function tryCleanupUpgrade() {
+  if (uploadBusy || pendingUpgrade) return false;
+  return upgrade.cleanup(DATA_DIR);
+}
+setTimeout(() => {
+  if (tryCleanupUpgrade()) return;
+  setTimeout(tryCleanupUpgrade, 30000);
+}, 5000);
+
 const startedAt = Date.now();
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -106,6 +121,39 @@ function readBody(req, limit = 1024 * 1024) {
       catch (e) { reject(new Error('JSON 解析失败')); }
     });
     req.on('error', reject);
+  });
+}
+
+function isLoopback(req) {
+  const ra = req.socket.remoteAddress || '';
+  return ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
+}
+
+// 升级包直接流式落盘, 不按 JSON 解析, 也不在内存里攒整包。
+function saveUpload(req, file, limit) {
+  return new Promise((resolve, reject) => {
+    let ws;
+    let size = 0;
+    let settled = false;
+    const fail = e => {
+      if (settled) return;
+      settled = true;
+      try { req.unpipe(); } catch (e2) {}
+      try { ws.destroy(); } catch (e2) {}
+      try { fs.unlinkSync(file); } catch (e2) {}
+      reject(e);
+    };
+    const declared = Number(req.headers['content-length']);
+    if (isFinite(declared) && declared > limit) return fail(new Error('压缩包超过 ' + Math.round(limit / 1048576) + 'MB'));
+    try { ws = fs.createWriteStream(file); } catch (e) { return fail(e); }
+    req.on('data', c => {
+      size += c.length;
+      if (size > limit) { fail(new Error('压缩包超过 ' + Math.round(limit / 1048576) + 'MB')); req.destroy(); }
+    });
+    req.on('error', fail);
+    ws.on('error', fail);
+    ws.on('finish', () => { if (settled) return; settled = true; resolve({ size }); });
+    req.pipe(ws);
   });
 }
 
@@ -159,8 +207,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
       if (req.method === 'POST' && p === '/api/shutdown') {
-        const ra = req.socket.remoteAddress || '';
-        if (ra !== '127.0.0.1' && ra !== '::1' && ra !== '::ffff:127.0.0.1') {
+        if (!isLoopback(req)) {
           return json(res, 403, { error: '仅允许本机回环地址关闭服务' });
         }
         json(res, 200, { ok: true });
@@ -168,12 +215,56 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'POST' && p === '/api/restart') {
-        const ra = req.socket.remoteAddress || '';
-        if (ra !== '127.0.0.1' && ra !== '::1' && ra !== '::ffff:127.0.0.1') {
+        if (!isLoopback(req)) {
           return json(res, 403, { error: '仅允许本机回环地址重启服务' });
         }
         json(res, 200, { ok: true });
         setTimeout(restart, 300);
+        return;
+      }
+      // 在线升级两步: 先上传校验(只解包到数据目录, 不动程序文件),
+      // 再由用户确认后拉起接管进程. 两步都只允许本机回环, 与停止/重启一致。
+      if (req.method === 'POST' && p === '/api/upgrade') {
+        if (!isLoopback(req)) return json(res, 403, { error: '仅允许本机回环地址升级' });
+        if (!paths.rootWritable) {
+          return json(res, 403, { error: '程序目录不可写, 无法在线升级。请把整个 WinMon 目录移到 D:\\WinMon 这类可写位置后重试' });
+        }
+        const upDir = upgrade.upgradeDir(DATA_DIR);
+        const zipFile = path.join(upDir, 'upload.zip');
+        uploadBusy = true;
+        try {
+          mkdirp(upDir);
+          const got = await saveUpload(req, zipFile, 300 * 1024 * 1024);
+          const r = upgrade.stage(zipFile, DATA_DIR, VERSION);
+          pendingUpgrade = r;
+          console.log('[升级] 已接收并校验升级包 v' + r.version + ' (' + r.files + ' 个文件, ' + (got.size / 1048576).toFixed(1) + 'MB)');
+          return json(res, 200, { ok: true, from: VERSION, to: r.version, files: r.files, size: got.size });
+        } catch (e) {
+          pendingUpgrade = null;
+          console.error('[升级] 升级包校验失败:', e.message);
+          return json(res, 400, { error: e.message });
+        } finally {
+          uploadBusy = false;
+        }
+      }
+      if (req.method === 'POST' && p === '/api/upgrade/apply') {
+        if (!isLoopback(req)) return json(res, 403, { error: '仅允许本机回环地址升级' });
+        if (!pendingUpgrade || !fs.existsSync(path.join(pendingUpgrade.staging, 'server.js'))) {
+          pendingUpgrade = null;
+          return json(res, 400, { error: '没有待应用的升级包, 请先上传新版压缩包' });
+        }
+        let pid;
+        try {
+          pid = upgrade.apply({ staging: pendingUpgrade.staging, root: ROOT, dataDir: DATA_DIR, pid: process.pid, version: pendingUpgrade.version });
+        } catch (e) {
+          console.error('[升级] 拉起升级进程失败:', e.message);
+          return json(res, 500, { error: '拉起升级进程失败: ' + e.message });
+        }
+        const to = pendingUpgrade.version;
+        pendingUpgrade = null;
+        console.log('[升级] 接管进程 PID=' + pid + ' 将在本进程退出后替换文件并重启');
+        json(res, 200, { ok: true, from: VERSION, to: to });
+        setTimeout(exitForUpgrade, 600);
         return;
       }
       if (req.method === 'GET' && p === '/api/notify') {
@@ -540,6 +631,14 @@ server.on('error', e => {
   }
   process.exit(1);
 });
+
+// 升级时先让出进程: 接管进程要等本进程退出后才能覆盖 runtime\node.exe。
+function exitForUpgrade() {
+  try { server.close(); } catch (e) {}
+  try { db.close(); } catch (e) {}
+  try { fs.unlinkSync(path.join(DATA_DIR, 'server.pid')); } catch (e) {}
+  process.exit(0);
+}
 
 function shutdown() {
   console.log('\n正在停止服务...');

@@ -293,6 +293,8 @@ Agent 目录里的 `config.json` 只需要 `agent` 段，其它段留着不影�
 
 **分组折叠状态**存在浏览器本地（localStorage），不在 `store.json` 里，换浏览器或清缓存会回到全部展开。
 
+**在线升级**同样不在 `config.json` 里配置：入口是界面右上角「升级」，或直接把新版服务端包拖到页面任意位置。升级只替换程序文件，`config.json` 与数据目录原样保留（文件清单见 §6）。
+
 ---
 
 ## 5. 常见场景速查
@@ -332,6 +334,19 @@ Agent 目录里的 `config.json` 只需要 `agent` 段，其它段留着不影�
 - `secure` 与 `port` 要配对：ssl+465 或 starttls+587。
 - 用界面「发送测试邮件」验证，失败原因会直接显示，也可查 `data\server.log`。
 
+**在线升级提示「该包版本不高于当前版本」**
+- 只能升级到**更高**版本。到 Releases 页确认下载的是新版 `winmon-server-windows-v*.zip`，Agent 包不能用来升级服务端。
+
+**在线升级提示「不是完整的服务端安装包」/「缺少在线升级组件」**
+- 上传的不是完整服务端包（可能是 Agent 包或没下载完）。重新下载完整的 `winmon-server-windows-v*.zip` 再传。
+
+**在线升级提示「程序目录不可写」**
+- 程序放在 `Program Files` 或 C 盘根目录，普通权限改不了文件。把整个目录移到 `D:\WinMon` 这类可写位置后重试。
+
+**点了「立即升级」后页面一直转圈 / 服务没起来**
+- 看 `data\upgrade-helper.log`：接管进程会写明覆盖了多少文件、失败原因，失败时会尝试把旧版拉起来。
+- 仍起不来就双击 `start.bat`。升级失败不会动 `config.json` 与 `data`，数据不会丢。
+
 **关掉 Agent 窗口就不上报了**
 - 用的是 `agent.bat`（前台）。改用 `agent-background.bat`（§2.5）。
 
@@ -350,5 +365,7 @@ Agent 目录里的 `config.json` 只需要 `agent` 段，其它段留着不影�
 | `server.pid` / `agent.pid` | 进程号，停止脚本用 |
 | `agent-state.json` | Agent 最近一次上报结果，`--status` 用 |
 | `diagnose.txt` | `diagnose.bat` 生成的中文诊断报告 |
+| `upgrade-helper.log` | 在线升级接管进程日志（替换文件、重启结果） |
+| `upgrade/` | 在线升级临时目录（上传的压缩包与解包结果），服务启动后自动清理 |
 
 备份只需要复制整个数据目录。

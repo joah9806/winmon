@@ -42,6 +42,7 @@ function applyTheme(t) {
 applyTheme(localStorage.getItem('winmon-theme') || 'dark');
 let serverStopped = false;
 let restarting = false;
+let upgrading = false;
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1196,6 +1197,162 @@ async function notifyModal() {
   };
 }
 
+/* ---------- 在线升级 ---------- */
+
+function hasFileDrag(e) {
+  const t = e.dataTransfer && e.dataTransfer.types;
+  return !!t && Array.prototype.indexOf.call(t, 'Files') >= 0;
+}
+
+function dropMask(show) {
+  const m = $('#dropMask');
+  if (m) m.classList.toggle('show', !!show);
+}
+
+function fmtSize(n) {
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let v = Number(n) || 0;
+  let i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)) + u[i];
+}
+
+function uploadZip(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upgrade');
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress(Math.round(e.loaded / e.total * 100)); };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch (e) {}
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error(data.error || '上传失败(' + xhr.status + ')'));
+    };
+    xhr.onerror = () => reject(new Error('上传失败, 请检查与服务端的连接'));
+    xhr.send(file);
+  });
+}
+
+async function waitForUpgrade(to) {
+  const start = Date.now();
+  const tick = async () => {
+    if (Date.now() - start > 180000) {
+      $('#serverStatus').innerHTML = '<span class="dot" style="background:var(--red)"></span>升级超时';
+      toast('升级超时, 请查看 data\\upgrade-helper.log, 或手动双击 start.bat 启动', true);
+      upgrading = false;
+      return;
+    }
+    try {
+      const h = await api('/api/health');
+      if (h.version === to) { location.reload(); return; }
+    } catch (e) {}
+    setTimeout(tick, 1000);
+  };
+  setTimeout(tick, 2000);
+}
+
+function upgradeModal(file) {
+  openModal(`
+    <h3>在线升级</h3>
+    <div class="hint">把新版服务端压缩包 <b>winmon-server-windows-v*.zip</b> 拖到下面的区域, 或点击选择文件。<br>
+      升级会替换程序文件并重启服务, 设备、历史数据与 <b>config.json</b> 都会保留。</div>
+    <div id="upDrop" class="drop-zone">
+      <div class="dz-main">把升级包拖到这里</div>
+      <div class="dz-sub">或点击选择 .zip 文件</div>
+    </div>
+    <input type="file" id="upFile" accept=".zip" style="display:none">
+    <div id="upBarWrap" style="display:none;margin:10px 0 4px"><div class="bar"><i id="upBar" style="width:0%"></i></div></div>
+    <div id="upState" class="hint"></div>
+    <div class="form-actions">
+      <button class="btn ghost" id="upCancel">取消</button>
+      <button class="btn" id="upGo" style="display:none">立即升级</button>
+    </div>`);
+  // 升级进行中不允许点遮罩关掉弹窗, 免得看不到进度提示。
+  const mask = $('#modalRoot').querySelector('.modal-mask');
+  if (mask) mask.onclick = e => { if (e.target.classList.contains('modal-mask') && !upgrading) closeModal(); };
+  const zone = $('#upDrop');
+  const tip = $('#upState');
+  let staged = null;
+  const show = (msg, color) => { tip.style.color = color || 'var(--muted)'; tip.textContent = msg; };
+
+  function upload(f) {
+    if (!/\.zip$/i.test(f.name)) return show('请选择 .zip 升级包', 'var(--red)');
+    staged = null;
+    $('#upGo').style.display = 'none';
+    $('#upBarWrap').style.display = 'block';
+    $('#upBar').style.width = '0%';
+    show('正在上传 ' + f.name + ' (' + fmtSize(f.size) + ')...');
+    uploadZip(f, pct => {
+      $('#upBar').style.width = pct + '%';
+      show('正在上传 ' + pct + '% (' + fmtSize(f.size) + ')');
+    }).then(r => {
+      staged = r;
+      $('#upBar').style.width = '100%';
+      show('已就绪: 当前 v' + r.from + ' → 新版本 v' + r.to + ' (' + r.files + ' 个文件, ' + fmtSize(r.size) + ')。点击「立即升级」替换文件并重启服务。', 'var(--green)');
+      $('#upGo').style.display = '';
+      $('#upGo').textContent = '升级到 v' + r.to;
+    }).catch(e => {
+      $('#upBarWrap').style.display = 'none';
+      show(e.message, 'var(--red)');
+    });
+  }
+
+  zone.onclick = () => $('#upFile').click();
+  $('#upFile').onchange = e => { const f = e.target.files[0]; if (f) upload(f); };
+  zone.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); zone.classList.add('over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); e.stopPropagation();
+    zone.classList.remove('over');
+    const f = e.dataTransfer.files[0];
+    if (f) upload(f);
+  });
+  $('#upCancel').onclick = () => { if (!upgrading) closeModal(); };
+
+  $('#upGo').onclick = async () => {
+    if (!staged) return;
+    const to = staged.to;
+    try { await api('/api/upgrade/apply', { method: 'POST' }); }
+    catch (e) { return show(e.message, 'var(--red)'); }
+    upgrading = true;
+    $('#upGo').disabled = true;
+    $('#upCancel').disabled = true;
+    $('#upFile').disabled = true;
+    $('#upBarWrap').style.display = 'none';
+    show('正在升级到 v' + to + ', 服务重启中, 页面会自动刷新...');
+    $('#serverStatus').innerHTML = '<span class="dot" style="background:var(--orange)"></span>升级中...';
+    waitForUpgrade(to);
+  };
+
+  if (file) upload(file);
+}
+
+// 直接把 zip 拖到页面任意位置也能升级; 弹窗打开时交给弹窗内的拖放区处理。
+let dragDepth = 0;
+window.addEventListener('dragenter', e => {
+  if (!hasFileDrag(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  if (!state.modalOpen) dropMask(true);
+});
+window.addEventListener('dragover', e => { if (hasFileDrag(e)) e.preventDefault(); });
+window.addEventListener('dragleave', e => {
+  if (!hasFileDrag(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) dropMask(false);
+});
+window.addEventListener('drop', e => {
+  if (!hasFileDrag(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  dropMask(false);
+  if (state.modalOpen) return;
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!f) return;
+  if (!/\.zip$/i.test(f.name)) return toast('请拖入 .zip 升级包', true);
+  upgradeModal(f);
+});
 /* ---------- 导航与刷新 ---------- */
 
 function syncNav() {
@@ -1217,6 +1374,7 @@ $('#themeToggle').onclick = () => {
 };
 
 $('#notifyBtn').onclick = () => notifyModal();
+$('#upgradeBtn').onclick = () => upgradeModal();
 
 $('#shutdownBtn').onclick = () => {
   confirmModal('停止监控服务?', '服务进程将退出, 本页面随之不可用。之后可双击 start.bat 重新启动。', async () => {
@@ -1256,7 +1414,7 @@ async function waitForRestart() {
 }
 
 async function pollStatus() {
-  if (serverStopped || restarting) return;
+  if (serverStopped || restarting || upgrading) return;
   const el = $('#serverStatus');
   try {
     const s = await api('/api/stats');
@@ -1267,7 +1425,7 @@ async function pollStatus() {
 }
 
 setInterval(() => {
-  if (serverStopped || restarting || state.modalOpen) return;
+  if (serverStopped || restarting || upgrading || state.modalOpen) return;
   const ae = document.activeElement;
   if (ae && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName)) return;
   if (['dashboard', 'host', 'alerts', 'probes'].includes(state.view)) render();

@@ -4,5 +4,5 @@ call pick-node.bat
 echo Packaging full server bundle...
 "%WINMON_NODE%" make-package.js server
 echo.
-echo Done: winmon-server-windows.zip
+echo Done: winmon-server-windows-v[version].zip
 pause

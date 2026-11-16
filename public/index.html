@@ -19,6 +19,7 @@
   <div class="header-actions">
     <button class="btn ghost sm" id="notifyBtn" title="配置告警通知(邮件/Webhook)">通知设置</button>
     <button class="btn ghost sm" id="themeToggle" title="切换深浅主题">浅色</button>
+    <button class="btn ghost sm" id="upgradeBtn" title="上传新版服务端压缩包在线升级">升级</button>
     <button class="btn ghost sm" id="restartBtn" title="重启监控服务">重启服务</button>
     <button class="btn danger sm" id="shutdownBtn" title="停止监控服务">停止服务</button>
   </div>
@@ -27,6 +28,7 @@
 <main id="main"></main>
 <div id="modalRoot"></div>
 <div id="toast"></div>
+<div id="dropMask" class="drop-mask"><div>松开鼠标, 上传升级包</div></div>
 <script src="/compat.js"></script>
 </body>
 </html>
