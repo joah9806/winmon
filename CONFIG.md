@@ -1,0 +1,337 @@
+# WinMon 配置说明 (config.json)
+
+本文档覆盖 **服务端** 与 **Agent** 的全部配置项。适用于 v1.6.0。
+
+---
+
+## 0. 先搞清楚三件事
+
+### 0.1 一个文件，两个程序，各读各的段
+
+服务端和 Agent 用的是**同一份 `config.json` 结构**，但各自只读自己关心的部分：
+
+| 配置段 | 服务端 `server.js` | Agent `agent.js` |
+|---|---|---|
+| `server` | ✅ 读取 | ❌ 忽略 |
+| `agent` | ❌ **忽略** | ✅ 读取 |
+| `collection` | ✅ 读取 | ❌ 忽略 |
+| `retention_days` | ✅ 读取 | ❌ 忽略 |
+| `token` (顶层) | ✅ 读取 | ❌ 忽略 |
+| `webhook_url` | ✅ 读取 | ❌ 忽略 |
+| `mail` | ✅ 读取 | ❌ 忽略 |
+
+> **最常见的误区**：在**服务端**的 `config.json` 里改 `agent.name` / `agent.server_url`，
+> 期望被监控的电脑跟着变 —— **不会有任何效果**。
+> `agent` 段只有那台被监控电脑上、Agent 自己目录里的 `config.json` 说了才算。
+> 服务端配置里的 `agent` 段只是打包时带出去的模板。
+
+### 0.2 配置文件在哪
+
+优先用**程序目录**下的 `config.json`（随发布包分发的那份）。
+
+如果程序目录只读（解压到了 `Program Files` 或 C 盘根目录），会自动改用：
+
+```
+%LOCALAPPDATA%\WinMon\data\config.json
+```
+
+首次切换时会把程序目录里的那份复制过去。实际使用的路径会写在日志和 `data\diagnose.txt` 里。
+
+也可以用环境变量强制指定数据目录（配置随数据目录走）：
+
+```bat
+set WINMON_DATA_DIR=D:\WinMonData
+```
+
+### 0.3 改完什么时候生效
+
+| 改动 | 生效方式 |
+|---|---|
+| 服务端 `server` / `collection` / `retention_days` / `token` | **重启服务端**（界面「重启服务」按钮，或 `stop.bat` + `start.bat`） |
+| 服务端 `mail` / `webhook_url` | 在界面「通知设置」里改并保存 → **立即生效**，同时写回 config.json |
+| Agent 的任何改动 | **重启 Agent**（`agent-stop.bat` + `agent-background.bat`） |
+
+`config.json` 必须是合法 JSON：不能有注释、不能有多余的逗号。解析失败时程序会打印
+`config.json 解析失败, 使用默认配置` 并**按默认值运行**，不会崩，但你的配置全部不生效。
+
+---
+
+## 1. 服务端配置
+
+### 1.1 完整示例
+
+```json
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8686,
+    "local_name": "监控服务器",
+    "open_browser": true
+  },
+  "collection": {
+    "interval_sec": 15,
+    "slow_interval_sec": 30
+  },
+  "retention_days": 7,
+  "token": "my-secret-2026",
+  "webhook_url": "",
+  "mail": {
+    "enabled": true,
+    "host": "smtp.qq.com",
+    "port": 465,
+    "secure": "ssl",
+    "user": "alert@example.com",
+    "pass": "SMTP授权码",
+    "from": "WinMon监控 <alert@example.com>",
+    "to": "ops@example.com, boss@example.com"
+  }
+}
+```
+
+### 1.2 `server` — 监听与本机显示
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `host` | string | `"0.0.0.0"` | 监听地址。`0.0.0.0` = 所有网卡（局域网其它电脑能访问）；`127.0.0.1` = 只允许本机访问，Agent 也就连不上了 |
+| `port` | number | `8686` | 监听端口。被占用时启动会失败并提示改这里 |
+| `local_name` | string | `""` | 服务端**自己这台机器**在界面里显示的名字。留空则用计算机名 |
+| `open_browser` | boolean | `true` | 启动成功后自动打开浏览器。只有显式写 `false` 才关闭；重启服务时不会重复打开 |
+
+> `local_name` 只管服务端自己。要改**别的**电脑的名字，见 §3。
+
+### 1.3 `collection` — 服务端本机采集节奏
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `interval_sec` | number | `15` | 服务端采集**自己这台机器**指标的间隔（秒） |
+| `slow_interval_sec` | number | `30` | 慢指标（磁盘、网卡、进程数）的缓存时间（秒）。这些指标走 PowerShell/WMI，比较慢，不必每次都查 |
+
+`interval_sec` 还决定了**离线判定阈值**：
+
+```
+离线阈值 = max(90 秒, collection.interval_sec × 4)
+```
+
+超过这个时间没上报的主机被判为离线并产生「主机离线」告警。默认 15 秒 → 阈值 90 秒。
+如果你把 Agent 的 `interval_sec` 调得很大（比如 120 秒），要相应把服务端的
+`collection.interval_sec` 调大，否则 Agent 会被反复误判离线。
+
+> 这两个值**不影响 Agent 的上报频率**，Agent 只看自己的 `agent.interval_sec`。
+> 也不影响探测设备的频率，那个在界面里每台设备单独设（见 §4）。
+
+### 1.4 `retention_days` — 历史数据保留
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `retention_days` | number | `7` | 历史指标保留天数，每小时清理一次超期数据 |
+
+- 只清理**历史指标**。主机、设备配置、触发器不受影响。
+- **已恢复的告警**固定保留 30 天后清理，与本项无关；**未恢复的告警**永不自动清理。
+- 调小会立即在下一个清理周期删数据，**不可恢复**，改之前想清楚。
+
+### 1.5 `token` — Agent 上报校验
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `token` | string | `""` | 非空时，`/api/push` 必须带上完全相同的 token，否则返回 403 |
+
+- 留空 = 不校验，任何能访问到端口的机器都能上报。
+- 设了之后，**每台 Agent** 的 `agent.token` 都要填成一样的值。
+- ⚠️ **它只保护上报接口**。Web 界面和其它管理接口（改配置、删设备、停服务）**不受 token 保护**。
+  不要把端口直接暴露到公网；需要外网访问请套一层带认证的反向代理或 VPN。
+  （「停止服务」「重启服务」两个接口另外限制只允许本机回环地址调用。）
+
+### 1.6 `webhook_url` — 告警 Webhook
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `webhook_url` | string | `""` | 告警产生/恢复时向该地址 POST 一个 JSON，超时 8 秒 |
+
+推送内容示例：
+
+```json
+{
+  "event": "fire",
+  "severity": "critical",
+  "severity_name": "严重",
+  "host": "财务部-张三电脑",
+  "trigger": "CPU使用率过高",
+  "item": "CPU使用率",
+  "value": 96.2,
+  "threshold": 90,
+  "op": ">",
+  "message": "财务部-张三电脑: CPU使用率过高 ...",
+  "ts": 1794792810868
+}
+```
+
+`event` 为 `fire`（告警）或 `resolve`（恢复）。推送失败只记日志，不影响监控。
+企业微信/钉钉机器人可直接填其 Webhook 地址（注意它们各自要求的 JSON 格式与本格式不同，
+需要中转时自行加一层转换）。
+
+### 1.7 `mail` — 邮件通知
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | boolean | `false` | 是否发邮件。`false` 时其它字段填了也不发 |
+| `host` | string | `""` | SMTP 服务器，如 `smtp.qq.com` / `smtp.163.com` / `smtp.exmail.qq.com` |
+| `port` | number | `465` | 端口。留空/非法时按 `secure` 取默认：ssl→465、starttls→587、none→25 |
+| `secure` | string | `"ssl"` | 加密方式，只能是 `ssl` / `starttls` / `none` |
+| `user` | string | `""` | SMTP 登录账号，通常是完整邮箱地址 |
+| `pass` | string | `""` | SMTP 密码。**QQ/163 等要用「授权码」，不是邮箱登录密码** |
+| `from` | string | `""` | 发件人。可写 `WinMon监控 <alert@example.com>`；留空则用 `user` |
+| `to` | string | `""` | 收件人，多个用逗号/分号/空格分隔（中英文标点都认） |
+
+- 三种加密方式对应关系：`ssl` = 连接即 TLS（465）；`starttls` = 先明文再升级（587）；`none` = 明文（25，仅内网中继用）。
+- 认证方式为 AUTH LOGIN，连接超时 20 秒。
+- 建议直接在界面「通知设置」里配置，有「发送测试邮件」按钮可以当场验证。
+- 界面读取配置时**不会返回密码明文**，只返回「是否已设置」；保存时密码留空表示沿用原密码。
+- 邮件发送失败只记日志（`data\server.log`），不会影响采集与告警判定。
+
+---
+
+## 2. Agent 配置
+
+### 2.1 完整示例
+
+Agent 目录里的 `config.json` 只需要 `agent` 段，其它段留着不影响：
+
+```json
+{
+  "agent": {
+    "server_url": "http://192.168.1.10:8686",
+    "token": "my-secret-2026",
+    "interval_sec": 15,
+    "hostname": "",
+    "name": "财务部-张三电脑"
+  }
+}
+```
+
+### 2.2 字段说明
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `server_url` | string | `"http://127.0.0.1:8686"` | 服务端地址，**填到端口为止**，不要带 `/api/push`（程序自己拼）。末尾多余的 `/` 会被去掉 |
+| `token` | string | `""` | 与服务端顶层 `token` 完全一致；服务端没设就留空 |
+| `interval_sec` | number | `15` | 上报间隔（秒）。**最小 5 秒**，填更小的值会被抬到 5 |
+| `hostname` | string | `""` | **主机标识**，留空用计算机名。见下方警告 |
+| `name` | string | `""` | **显示名称**，留空用计算机名。这是给设备起自定义名字的地方 |
+
+派生值：慢指标缓存时间 = `max(30, interval_sec × 2)` 秒。
+
+### 2.3 `hostname` 与 `name` 的区别（重要）
+
+- `hostname` → **身份**。服务端靠它认出「这是同一台机器」。
+  **改了它等于换了一台新主机**：会新增一条记录，旧记录变成离线并可能告警。
+  只在计算机名重复、或想固定标识时才设。
+- `name` → **显示名字**。随便改，不影响历史数据的连续性。
+
+### 2.4 名字到底谁说了算
+
+优先级从高到低：
+
+1. **界面上手工改的名字**（主机管理 → 「改名/类型」，或主机详情页 → 「改名/类型」）
+   → 一旦改过，**永久以界面为准**，Agent 之后上报什么都不再覆盖它。
+2. **Agent 的 `agent.name`** → 没在界面改过时生效，改配置并重启 Agent 即可更新。
+3. **计算机名** → 上面两个都没设时的兜底。
+
+界面上主机名后面带 `(自动)` 表示当前名字来自 Agent 上报（第 2/3 档），还没被手工锁定。
+
+> v1.5.1 及更早版本有个问题：主机注册后 `agent.name` 改了也不生效。v1.6.0 已修复。
+> 升级时，旧库里名字与计算机名不同的主机会被自动认定为「已自定义」并保留，不会被覆盖回去。
+
+### 2.5 Agent 运行方式
+
+| 脚本 | 行为 |
+|---|---|
+| `agent.bat` | **前台**运行，日志直接打在窗口里。**关掉窗口 = 停止 Agent** |
+| `agent-background.bat` | **后台**运行，无窗口。启动后会确认「真的上报成功」才提示可以关窗口；**关掉这个窗口 Agent 继续跑** |
+| `agent-stop.bat` | 停止后台 Agent |
+| `agent.js --status` | 查看状态：`OK` / `FAIL` / `STALE` / `STOPPED` / `STARTING` |
+
+- 后台启动失败时会**自动转前台**，把报错留在屏幕上，不会静默失败。
+- 重复启动会被拦住（提示已在运行并给出 PID），不会跑出两个 Agent 抢同一个标识。
+- 日志：`data\agent.log`（UTF-8 带 BOM，Win7 记事本可直接看）。
+  程序目录只读时在 `%LOCALAPPDATA%\WinMon\data\agent.log`。
+- 开机自启：把 `agent-background.bat` 的快捷方式放进
+  `shell:startup`（Win+R 输入）即可，无需装服务。
+
+---
+
+## 3. 给设备改名字 / 归类的三种方式
+
+| 设备来源 | 改名方式 |
+|---|---|
+| **Agent 自动注册** | ① 界面：主机管理 → 「Agent 上报主机」→ 「改名/类型」（推荐，立即生效且永久保留）<br>② 那台电脑的 `config.json` → `agent.name`，重启 Agent |
+| **手工添加的探测设备** | 主机管理 → 「编辑」→ 名称。改名会同步写入探测配置 |
+| **服务端自己** | 服务端 `config.json` → `server.local_name`，重启服务端 |
+
+设备类型（摄像机/交换机/Windows电脑…）决定它在列表里分到哪一组：
+
+- 探测设备：在「新建/编辑监控目标」里选。
+- Agent 主机：注册时按操作系统自动推断（Windows → Windows电脑，Linux → Linux服务器），
+  之后可在「改名/类型」里改。
+
+---
+
+## 4. 不在 config.json 里的配置
+
+以下都在**界面**里配，存在数据目录的 `store.json`，不用改文件：
+
+| 配置 | 位置 | 说明 |
+|---|---|---|
+| 探测设备（地址/类型/探测方式） | 主机管理 → 新建监控目标 | 探测间隔每台单独设，**10–3600 秒**，默认 60 |
+| 探测方式参数 | 同上 | Ping / TCP 端口 / HTTP URL / SNMP(community、版本、ifIndex、CPU OID) / 数据库(类型、端口、账号、密码、库名) |
+| 触发器（告警规则） | 触发器 | 指标、比较符、阈值、连续次数(1–100)、级别、可绑定单台主机 |
+| 邮件 / Webhook | 通知设置 | 保存即生效并写回 config.json |
+
+探测超时是固定的：Ping 每包 1 秒共 4 包，TCP 5 秒，HTTP 8 秒。
+
+---
+
+## 5. 常见场景速查
+
+**局域网内其它电脑上报不上来**
+1. 服务端 `server.host` 是不是被改成了 `127.0.0.1`？改回 `0.0.0.0`。
+2. Agent 的 `server_url` 填的是服务端**局域网 IP**，不是 `127.0.0.1`。
+3. 服务端设了 `token` 吗？Agent 的 `agent.token` 要一模一样。
+4. 服务端防火墙放行 8686 端口（TCP 入站）。
+5. 看 Agent 日志 `data\agent.log` 的具体报错。
+
+**设备名字改不动 / 改了又变回去**
+- 在**服务端**配置里改 `agent.name` 是无效的（§0.1）。
+- 要在界面「改名/类型」里改，或改**那台电脑**的 Agent 配置。
+- 界面改过的名字优先级最高，不会被上报覆盖（§2.4）。
+
+**Agent 主机在主机管理里看不到**
+- v1.6.0 起在「Agent 上报主机」分区显示。确认 Agent 至少成功上报过一次（`agent.js --status` 显示 `OK`）。
+
+**主机反复被判离线**
+- Agent 的 `interval_sec` 比服务端离线阈值还大。把服务端 `collection.interval_sec` 调大（§1.3）。
+
+**邮件发不出去**
+- QQ/163 的 `pass` 要填**授权码**，不是邮箱密码。
+- `secure` 与 `port` 要配对：ssl+465 或 starttls+587。
+- 用界面「发送测试邮件」验证，失败原因会直接显示，也可查 `data\server.log`。
+
+**关掉 Agent 窗口就不上报了**
+- 用的是 `agent.bat`（前台）。改用 `agent-background.bat`（§2.5）。
+
+---
+
+## 6. 数据与日志文件一览
+
+都在数据目录（程序目录 `data\`，只读时 `%LOCALAPPDATA%\WinMon\data\`）：
+
+| 文件 | 内容 |
+|---|---|
+| `store.json` | 主机、探测设备、触发器、告警 |
+| `history/` | 历史指标数据 |
+| `server.log` | 服务端日志（带时间戳，UTF-8 BOM） |
+| `agent.log` | Agent 日志（同上） |
+| `server.pid` / `agent.pid` | 进程号，停止脚本用 |
+| `agent-state.json` | Agent 最近一次上报结果，`--status` 用 |
+| `diagnose.txt` | `diagnose.bat` 生成的中文诊断报告 |
+
+备份只需要复制整个数据目录。

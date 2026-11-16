@@ -11,33 +11,12 @@ const paths = require('./lib/paths');
 const { spawn } = require('child_process');
 
 const ROOT = paths.ROOT;
-const VERSION = '1.5.1';
+const VERSION = '1.6.0';
 const CONFIG_FILE = paths.CONFIG_FILE;
 const DATA_DIR = paths.DATA_DIR;
 const PUBLIC_DIR = paths.PUBLIC_DIR;
 
-// 隐藏窗口启动时进程没有可见控制台, 日志必须由自己落盘。
-// 旧版靠 cmd 的 ">> server.log" 重定向: 句柄被独占后重启写不进日志,
-// 而重定向本身失败(目录只读)时错误也随隐藏窗口一起消失。
-(function teeLog() {
-  let stream;
-  try {
-    // Win7 的记事本只有见到 BOM 才按 UTF-8 解码, 否则中文日志全是乱码。
-    const fresh = !fs.existsSync(paths.LOG_FILE) || fs.statSync(paths.LOG_FILE).size === 0;
-    stream = fs.createWriteStream(paths.LOG_FILE, { flags: 'a' });
-    if (fresh) stream.write('\ufeff');
-  } catch (e) { return; }
-  stream.on('error', () => {});
-  const util = require('util');
-  for (const kind of ['log', 'error', 'warn']) {
-    const orig = console[kind].bind(console);
-    console[kind] = function () {
-      const line = util.format.apply(null, arguments);
-      try { stream.write('[' + new Date().toLocaleString('zh-CN', { hour12: false }) + '] ' + line + '\n'); } catch (e) {}
-      orig.apply(null, arguments);
-    };
-  }
-})();
+require('./lib/log')(paths.LOG_FILE);
 
 const DEFAULT_CONFIG = {
   server: { host: '0.0.0.0', port: 8686, local_name: '', open_browser: true },
@@ -303,11 +282,27 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'PUT' && p === '/api/host') {
         const id = Number(u.searchParams.get('id'));
-        if (!db.getHost(id)) return json(res, 404, { error: '主机不存在' });
+        const h = db.getHost(id);
+        if (!h) return json(res, 404, { error: '主机不存在' });
         const b = await readBody(req);
-        const name = String(b.name || '').trim().slice(0, 128);
-        if (!name) return json(res, 400, { error: '名称不能为空' });
-        db.renameHost(id, name);
+        const patch = {};
+        if (b.name != null) {
+          const name = String(b.name).trim().slice(0, 128);
+          if (!name) return json(res, 400, { error: '名称不能为空' });
+          patch.name = name;
+        }
+        if (b.dtype != null) {
+          if (!DEVICE_TYPES.includes(b.dtype)) return json(res, 400, { error: '无效的设备类型' });
+          patch.dtype = b.dtype;
+        }
+        if (!Object.keys(patch).length) return json(res, 400, { error: '没有需要修改的字段' });
+        if (h.kind === 'probe' && patch.name) {
+          // 探测主机的名字每次探测都会从目标配置回填, 只改主机记录会被覆盖。
+          const tid = Number(String(h.host_key).slice(6));
+          const t = db.getTarget(tid);
+          if (t) db.updateTarget(tid, { ...t, name: patch.name, enabled: !!t.enabled });
+        }
+        db.updateHost(id, patch);
         return json(res, 200, { ok: true });
       }
       if (req.method === 'DELETE' && p === '/api/host') {
@@ -363,6 +358,17 @@ const server = http.createServer(async (req, res) => {
         });
       }
       return json(res, 404, { error: '接口不存在' });
+    }
+
+    if (req.method === 'GET' && p === '/download/CONFIG.md') {
+      const file = path.join(ROOT, 'CONFIG.md');
+      if (!fs.existsSync(file)) { res.writeHead(404); return res.end('CONFIG.md 不存在'); }
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Length': fs.statSync(file).size,
+      });
+      fs.createReadStream(file).pipe(res);
+      return;
     }
 
     if (req.method === 'GET' && p === '/download/agent-package.zip') {

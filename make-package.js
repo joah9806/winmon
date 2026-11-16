@@ -49,8 +49,9 @@ function packServer() {
 }
 
 const AGENT_FILES = [
-  'agent.js', 'agent.bat', 'pick-node.bat', 'stop.bat', 'config.json',
-  'lib/paths.js', 'lib/metrics.js', 'lib/collect.ps1', 'lib/httpc.js',
+  'agent.js', 'agent.bat', 'agent-background.bat', 'agent-stop.bat', 'agent-hidden.vbs',
+  'pick-node.bat', 'stop.bat', 'config.json', 'CONFIG.md',
+  'lib/paths.js', 'lib/log.js', 'lib/metrics.js', 'lib/collect.ps1', 'lib/httpc.js',
 ];
 
 function packAgent() {
@@ -99,8 +100,8 @@ async function packLinux() {
   }
   const st = fs.statSync(bin);
   const entries = [{ name: 'runtime/node', data: fs.readFileSync(bin), exec: true, mtime: st.mtimeMs }];
-  entries.push(entry('agent.js'), entry('agent.sh', 'agent.sh', true), entry('config.json'));
-  entries.push(entry('lib/paths.js'), entry('lib/metrics.js'), entry('lib/httpc.js'));
+  entries.push(entry('agent.js'), entry('agent.sh', 'agent.sh', true), entry('config.json'), entry('CONFIG.md'));
+  entries.push(entry('lib/paths.js'), entry('lib/log.js'), entry('lib/metrics.js'), entry('lib/httpc.js'));
   save('agent-linux.zip', entries);
 }
 

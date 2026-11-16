@@ -117,7 +117,7 @@ function checkRuntime() {
 
 // ---------- files / permissions / modules / storage ----------
 const REQUIRED = ['server.js', 'agent.js', 'config.json',
-  'lib/paths.js', 'lib/db.js', 'lib/store.js', 'lib/metrics.js', 'lib/alert.js', 'lib/probe.js',
+  'lib/paths.js', 'lib/log.js', 'lib/db.js', 'lib/store.js', 'lib/metrics.js', 'lib/alert.js', 'lib/probe.js',
   'lib/mailer.js', 'lib/httpc.js', 'lib/snmp.js', 'lib/dbcheck.js', 'lib/collect.ps1',
   'public/index.html', 'public/app.js', 'public/compat.js', 'public/style.css'];
 

@@ -384,6 +384,39 @@ async function renderProbes() {
     }
   }
   if (!rowsHtml) rowsHtml = `<tr><td colspan="10" class="empty">${q ? '没有匹配的设备' : '暂无监控目标, 点击"新建监控目标"添加'}</td></tr>`;
+
+  const agentAll = hosts.filter(h => h.kind === 'agent');
+  const agentFiltered = q
+    ? agentAll.filter(h => (h.name || '').toLowerCase().includes(q) || (h.ip || '').toLowerCase().includes(q) || (h.host_key || '').toLowerCase().includes(q))
+    : agentAll;
+  const agroups = {};
+  for (const h of agentFiltered) (agroups[h.dtype || 'other'] = agroups[h.dtype || 'other'] || []).push(h);
+  const aTypeOrder = Object.keys(DEVICE_TYPE_NAMES).filter(k => agroups[k]);
+  for (const k of Object.keys(agroups)) if (!aTypeOrder.includes(k)) aTypeOrder.push(k);
+  let agentRowsHtml = '';
+  for (const k of aTypeOrder) {
+    const list = agroups[k].sort((a, b) =>
+      ipKey(a.ip) - ipKey(b.ip) || String(a.ip).localeCompare(String(b.ip)) || a.name.localeCompare(b.name));
+    const color = TYPE_COLORS[k] || TYPE_COLORS.other;
+    agentRowsHtml += `<tr class="group-row"><td colspan="8"><span class="grp-mark" style="background:${color}"></span>${esc(DEVICE_TYPE_NAMES[k] || k)}<span class="grp-count">${list.length}</span></td></tr>`;
+    for (const h of list) {
+      agentRowsHtml += `<tr>
+        <td><b>${esc(h.name)}</b>${h.name_custom ? '' : ' <span class="hint">(自动)</span>'}</td>
+        <td>${esc(DEVICE_TYPE_NAMES[h.dtype] || h.dtype || '未分类')}</td>
+        <td>${esc(h.ip || '-')}</td>
+        <td>${esc(h.host_key)}</td>
+        <td style="max-width:260px">${esc(h.os || '-')}</td>
+        <td><span class="dot ${h.online ? 'on' : 'off'}"></span> ${h.online ? '在线' : '离线'}</td>
+        <td>${fmtAgo(h.last_seen)}</td>
+        <td style="white-space:nowrap">
+          <button class="btn ghost sm" data-hedit="${h.id}">改名/类型</button>
+          <button class="btn ghost sm" data-hview="${h.id}">详情</button>
+          <button class="btn danger sm" data-hdel="${h.id}">删除</button>
+        </td>
+      </tr>`;
+    }
+  }
+  if (!agentRowsHtml) agentRowsHtml = `<tr><td colspan="8" class="empty">${q ? '没有匹配的 Agent 主机' : '暂无 Agent 上报主机, 在目标电脑部署 Agent 后会自动出现在这里'}</td></tr>`;
   const origin = location.origin;
   main.innerHTML = `
     <div class="toolbar">
@@ -392,7 +425,7 @@ async function renderProbes() {
       <button class="btn ghost" id="expTargets">导出</button>
       <input type="text" id="probeSearch" placeholder="搜索名称 / IP地址" style="width:220px" value="${esc(state.probeSearch)}">
       <div class="spacer"></div>
-      <span class="hint">共 ${targets.length} 台设备${q ? `, 匹配 ${filtered.length} 台` : ''} · 按类型分组 · IP 排序</span>
+      <span class="hint">探测设备 ${targets.length} 台 · Agent 主机 ${agentAll.length} 台${q ? ` · 匹配 ${filtered.length + agentFiltered.length} 台` : ''} · 按类型分组 · IP 排序</span>
     </div>
     <div class="toolbar" id="probeBulk" style="display:none">
       <span class="hint">已选 <b id="probeSelCount">0</b> 项</span>
@@ -404,16 +437,40 @@ async function renderProbes() {
       <table><thead><tr><th style="width:34px"><input type="checkbox" id="selAllProbes" title="全选"></th><th>名称</th><th>类型</th><th>地址</th><th>探测方式</th><th>间隔</th><th>状态</th><th>最近错误</th><th>启用</th><th>操作</th></tr></thead>
       <tbody>${rowsHtml}</tbody></table>
     </div>
+    <div class="panel" style="padding:0;overflow-x:auto">
+      <div class="toolbar" style="border-bottom:1px solid var(--line)">
+        <h2 style="margin:0">Agent 上报主机</h2>
+        <div class="spacer"></div>
+        <span class="hint">部署 Agent 后自动注册, 可在此改名与归类</span>
+      </div>
+      <table><thead><tr><th>名称</th><th>类型</th><th>IP 地址</th><th>主机标识</th><th>操作系统</th><th>状态</th><th>最后上报</th><th>操作</th></tr></thead>
+      <tbody>${agentRowsHtml}</tbody></table>
+    </div>
     <div class="panel">
       <h2>接入新主机 (Agent 部署)</h2>
       <div class="hint">
         ${stats.agent_package ? '<a href="/download/agent-package.zip" download>下载 Agent 部署包 (agent-package.zip, 含运行时)</a><br>' : '提示: 在服务端目录运行 make-agent.bat 可生成 agent-package.zip 部署包<br>'}
         1. 将 <b>agent-package.zip</b> 复制到目标 Windows 电脑并解压 (无需安装任何环境);<br>
         2. 修改解压目录中 <b>config.json</b> 的 agent.server_url 为服务端地址, 例如:
-        <div class="code">"agent": { "server_url": "${esc(origin.replace('127.0.0.1', '服务端局域网IP'))}" }</div>
-        3. 双击 <b>agent.bat</b> 启动, 主机将自动注册并开始上报数据 (出现在"概览"中)。<br>
+        <div class="code">"agent": { "server_url": "${esc(origin.replace('127.0.0.1', '服务端局域网IP'))}", "name": "财务部-张三电脑" }</div>
+        3. 双击 <b>agent-background.bat</b> 后台启动 (无窗口, 关掉启动窗口也继续上报);
+        想看实时日志就双击 <b>agent.bat</b> 前台运行, 但关掉窗口会停止 Agent;<br>
+        4. 主机自动注册后出现在上方「<b>Agent 上报主机</b>」分区和「概览」中, 可在那里改名与归类;<br>
+        5. 停止后台 Agent 用 <b>agent-stop.bat</b>; 日志在 <b>data\\agent.log</b>。<br>
         注: 若服务端 config.json 中设置了 token, Agent 端需填写相同的 token。<br>
+        注: <b>agent.name</b> 要改在<b>那台电脑</b>的 config.json 里; 改服务端的 agent 段不起作用。
+        界面上手工改过的名字优先级最高, 不会再被上报覆盖。<br>
         注: 部署包内含 64 位与 32 位 Node 12 运行时, 启动脚本自动选择, 支持 Windows 7 SP1 及以上。
+      </div>
+    </div>
+    <div class="panel">
+      <h2>配置说明</h2>
+      <div class="hint">
+        服务端与 Agent 的全部配置项、默认值、取值范围与常见场景排查:
+        <a href="/download/CONFIG.md" target="_blank"><b>CONFIG.md 配置文档</b></a>
+        (发布包内也有同名文件)。<br>
+        要点: 服务端只读 <b>server / collection / retention_days / token / webhook_url / mail</b> 段,
+        Agent 只读 <b>agent</b> 段; 改完服务端配置需重启服务, 改完 Agent 配置需重启 Agent。
       </div>
     </div>
     <div class="panel">
@@ -500,6 +557,15 @@ async function renderProbes() {
       toast(sw.checked ? '已启用' : '已停用');
     } catch (e) { toast(e.message, true); sw.checked = !sw.checked; }
   });
+  main.querySelectorAll('[data-hedit]').forEach(b => b.onclick = () => hostEditModal(agentAll.find(h => h.id === Number(b.dataset.hedit)), renderProbes));
+  main.querySelectorAll('[data-hview]').forEach(b => b.onclick = () => openHost(Number(b.dataset.hview)));
+  main.querySelectorAll('[data-hdel]').forEach(b => b.onclick = () => {
+    const h = agentAll.find(x => x.id === Number(b.dataset.hdel));
+    confirmModal(`删除主机「${esc(h.name)}」?`, '其历史数据与告警将一并删除。Agent 仍在运行的话, 下次上报会重新注册该主机(名称回到 Agent 配置值)。', async () => {
+      await api('/api/host?id=' + h.id, { method: 'DELETE' });
+      toast('已删除'); renderProbes();
+    });
+  });
   if (state._restoreSearch) {
     state._restoreSearch = false;
     search.focus();
@@ -539,6 +605,32 @@ function bulkEditProbes(targets) {
     closeModal();
     toast(fail ? `已修改 ${sel.length - fail} 个, ${fail} 个失败` : `已修改 ${sel.length} 个目标`, !!fail);
     renderProbes();
+  };
+}
+
+function hostEditModal(h, done) {
+  const isProbe = h.kind === 'probe';
+  openModal(`
+    <h3>修改主机名称与类型</h3>
+    <div class="hint">${isProbe
+      ? '探测主机的名称会同步写入探测配置, 之后每次探测都保持这个名字。'
+      : '保存后以这里的名称为准, Agent 后续上报不会再覆盖它。留空则不修改名称。'}</div>
+    <div class="form-row"><label>显示名称</label><input type="text" id="heName" value="${esc(h.name)}" placeholder="如: 财务部-张三电脑"></div>
+    <div class="form-row"><label>设备类型</label><select id="heType">
+      ${Object.entries(DEVICE_TYPE_NAMES).map(([k, v]) => `<option value="${k}" ${(h.dtype || 'other') === k ? 'selected' : ''}>${v}</option>`).join('')}
+    </select></div>
+    ${isProbe ? '' : `<div class="hint">主机标识: ${esc(h.host_key)} · 当前名称来源: ${h.name_custom ? '界面自定义' : 'Agent 上报(可在 Agent 的 config.json 里设 agent.name)'}</div>`}
+    <div class="form-actions"><button class="btn ghost" id="heCancel">取消</button><button class="btn" id="heSave">保存</button></div>`);
+  $('#heCancel').onclick = closeModal;
+  $('#heSave').onclick = async () => {
+    const name = $('#heName').value.trim();
+    const body = { dtype: $('#heType').value };
+    if (name) body.name = name;
+    else if (isProbe) return toast('名称不能为空', true);
+    try {
+      await api('/api/host?id=' + h.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      toast('已保存'); closeModal(); done();
+    } catch (e) { toast(e.message, true); }
   };
 }
 
@@ -620,7 +712,8 @@ async function renderHost() {
       <h2><span class="dot ${h.online ? 'on' : 'off'}"></span> ${esc(h.name)}</h2>
       ${h.alerts > 0 ? `<span class="badge">${h.alerts} 条活动告警</span>` : '<span class="badge ok">正常</span>'}
       <div class="spacer"></div>
-      ${h.kind === 'probe' ? '<button class="btn ghost sm" id="cfgHostBtn">探测配置</button>' : '<button class="btn ghost sm" id="renameHostBtn">重命名</button>'}
+      <button class="btn ghost sm" id="editHostBtn">改名/类型</button>
+      ${h.kind === 'probe' ? '<button class="btn ghost sm" id="cfgHostBtn">探测配置</button>' : ''}
       <button class="btn danger sm" id="delHostBtn">删除主机</button>
     </div>
     <div class="panel"><div class="kv">
@@ -649,26 +742,12 @@ async function renderHost() {
       <tbody>${latest.map(r => `<tr><td>${esc(r.meta.name)}</td><td><b>${fmtVal(r.item, r.value)}</b></td><td>${fmtTime(r.ts)}</td></tr>`).join('')}</tbody></table>
     </div>`;
   $('#backBtn').onclick = () => { state.view = 'dashboard'; syncNav(); render(); };
+  $('#editHostBtn').onclick = () => hostEditModal(h, renderHost);
   if (h.kind === 'probe') {
     $('#cfgHostBtn').onclick = async () => {
       const tid = Number(String(h.host_key).slice(6));
       try { const ts = await api('/api/targets'); probeForm(ts.find(t => t.id === tid)); }
       catch (e) { toast(e.message, true); }
-    };
-  } else {
-    $('#renameHostBtn').onclick = () => {
-      openModal(`<h3>重命名主机</h3>
-        <div class="form-row"><label>显示名称</label><input type="text" id="rnName" value="${esc(h.name)}"></div>
-        <div class="form-actions"><button class="btn ghost" id="rnCancel">取消</button><button class="btn" id="rnSave">保存</button></div>`);
-      $('#rnCancel').onclick = closeModal;
-      $('#rnSave').onclick = async () => {
-        const name = $('#rnName').value.trim();
-        if (!name) return toast('名称不能为空', true);
-        try {
-          await api('/api/host?id=' + h.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
-          toast('已保存'); closeModal(); renderHost();
-        } catch (e) { toast(e.message, true); }
-      };
     };
   }
   $('#delHostBtn').onclick = () => {

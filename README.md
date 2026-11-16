@@ -60,10 +60,11 @@ Win7 SP1（32 位与 64 位）可直接运行，无需额外安装补丁或运�
 - **主题切换**：右上角「浅色/深色」按钮切换深浅主题，选择保存在浏览器本地，图表随主题重绘。
 - **Web 停止/重启服务**：右上角「停止服务」「重启服务」按钮（均含确认弹窗），仅允许本机回环地址调用。重启会拉起新进程并自动接管端口，页面在恢复后自动刷新。
 - **通知设置**：右上角「通知设置」按钮配置告警通知，支持 SMTP 邮件（SSL/STARTTLS/明文 + AUTH LOGIN）与 Webhook，可一键发送测试邮件。
-- **主机管理（设备列表）**：原「探测配置」与「主机管理」合并为单一「主机管理」页。设备**按类型分组**显示（摄像机/交换机/防火墙/控制器/Linux/Windows/数据库/网络链路/应用/其他），组内**默认按 IP 数值排序**，顶部搜索框可按名称或 IP 即时过滤，无需再手动选择类型。
-- **多选批量操作**：表格首列勾选框支持多选与全选，选中后出现批量操作栏，可批量修改（启用/停用、探测间隔、设备类型）与批量删除。
+- **主机管理（设备列表）**：原「探测配置」与「主机管理」合并为单一「主机管理」页，分两个分区：**探测设备**（手工添加）与 **Agent 上报主机**（Agent 自动注册）。两者都**按类型分组**显示（摄像机/交换机/防火墙/控制器/Linux/Windows/数据库/网络链路/应用/其他），组内**默认按 IP 数值排序**，顶部搜索框按名称或 IP 同时过滤两个分区，无需再手动选择类型。
+- **设备自定义名称**：Agent 主机在「Agent 上报主机」分区点「改名/类型」即可改名与归类；改过的名字**优先级最高**，Agent 后续上报不会覆盖。未手工改过时跟随 Agent 配置的 `agent.name`，留空则用计算机名（名字后带 `(自动)` 标记）。Agent 主机的类型按操作系统自动推断，可手工改。探测设备改名会同步写入探测配置。
+- **多选批量操作**：探测设备表格首列勾选框支持多选与全选，选中后出现批量操作栏，可批量修改（启用/停用、探测间隔、设备类型）与批量删除。
 - **设备导入导出**：主机管理页支持 JSON / CSV 导入导出（见下文）。
-- **主机详情管理**：在「概览」点击设备卡片进入详情，可重命名（Agent 主机）或编辑探测配置（探测设备），并删除主机。
+- **主机详情管理**：在「概览」点击设备卡片进入详情，可「改名/类型」、编辑探测配置（探测设备），并删除主机。
 
 > 运行时（`runtime/node.exe` 等）体积超过 GitHub 单文件限制，未纳入源码仓库，而是作为 Release 资产分发。克隆源码后需自行准备 `runtime/node.exe`（Node.js 12.22.12，Win7 兼容）与 `runtime/node-x86.exe`（32 位系统）才能运行。
 
@@ -72,11 +73,23 @@ Win7 SP1（32 位与 64 位）可直接运行，无需额外安装补丁或运�
 ### 1. Agent 采集（服务器 / 电脑深度指标）
 CPU、内存、磁盘、网络速率、进程数、运行时长。
 
-- **Windows**（7 SP1 / 8.1 / 10 / 11，32 位或 64 位）：下载 `agent-windows.zip`，解压后修改 `config.json` 中 `agent.server_url` 指向服务端，双击 `agent.bat`（自动选择对应位数的运行时）。
+- **Windows**（7 SP1 / 8.1 / 10 / 11，32 位或 64 位）：下载 `agent-windows.zip`，解压后修改 `config.json` 中 `agent.server_url` 指向服务端（可一并设 `agent.name` 作为显示名称），然后：
+
+  | 脚本 | 行为 |
+  |------|------|
+  | `agent-background.bat` | **后台运行，无窗口**。启动后确认上报成功才提示可关窗口，**关掉启动窗口 Agent 继续跑**。失败时自动转前台显示报错 |
+  | `agent.bat` | 前台运行，日志打在窗口里，**关窗口即停止** |
+  | `agent-stop.bat` | 停止后台 Agent |
+  | `agent.js --status` | 查看状态（`OK`/`FAIL`/`STALE`/`STOPPED`/`STARTING`） |
+
+  日志写 `data/agent.log`（UTF-8 带 BOM）。重复启动会被拦下并提示已运行的 PID，不会跑出两个 Agent。
+  开机自启：把 `agent-background.bat` 的快捷方式放进 `shell:startup`。
 - **Linux**：下载 `agent-linux.zip`（内置 Linux Node，基于 `/proc` 采集），解压后：
   ```sh
   chmod +x runtime/node agent.sh
-  ./agent.sh
+  ./agent.sh                      # 前台
+  nohup ./agent.sh >/dev/null 2>&1 &   # 后台，日志见 data/agent.log
+  ./runtime/node agent.js --stop  # 停止
   ```
 
 ### 2. 无代理探测（摄像机 / 交换机 / 防火墙 / 控制器 / 骨干网 / MV网 / 数据库 / 应用）
@@ -94,13 +107,21 @@ CPU、内存、磁盘、网络速率、进程数、运行时长。
 概览仪表盘、主机管理、告警中心、触发器。内置默认触发器（丢包过高、时延过高、端口不通、数据库连接失败、HTTP 异常、SNMP 不可达等），支持自定义阈值 / 持续次数 / 严重级，告警自动产生与恢复。告警触发与恢复时可推送 **SMTP 邮件**与 **Webhook** 通知（右上角「通知设置」）。删除设备会同步清除其概览卡片、历史数据与告警，不再残留。数据默认保留 7 天。
 
 ## 配置
-编辑 `config.json`：
-- `server.port`：Web 端口（默认 8686）
-- `collection.interval_sec`：本机采集间隔
-- `retention_days`：历史数据保留天数
-- `token`：Agent 上报校验令牌（可选）
+
+**完整配置文档见 [CONFIG.md](CONFIG.md)** —— 逐字段说明服务端与 Agent 的所有配置项、默认值、取值范围、生效方式与常见场景排查。发布包内含同名文件，界面「主机管理 → 配置说明」也可直接打开。
+
+服务端与 Agent 共用一份 `config.json` 结构，但**各读各的段**：服务端只读 `server` / `collection` / `retention_days` / `token` / `webhook_url` / `mail`，Agent 只读 `agent`。**在服务端配置里改 `agent` 段不会有任何效果。**
+
+常用项：
+- `server.port`：Web 端口（默认 8686）；`server.host`：监听地址（默认 `0.0.0.0`）；`server.local_name`：服务端本机显示名
+- `collection.interval_sec`：本机采集间隔，同时决定离线阈值 `max(90, interval_sec×4)` 秒
+- `retention_days`：历史数据保留天数（已恢复告警固定保留 30 天）
+- `token`：Agent 上报校验令牌（可选，**仅保护上报接口，不保护 Web 界面**）
+- `agent.server_url` / `agent.token` / `agent.interval_sec`（最小 5 秒）/ `agent.hostname`（主机标识，改了等于换新主机）/ `agent.name`（显示名称）
 - `webhook_url`：告警 Webhook（可选）
 - `mail`：SMTP 邮件通知，含 `enabled`、`host`、`port`、`secure`（`ssl`/`starttls`/`none`）、`user`、`pass`、`from`、`to`（多个收件人用逗号分隔）。推荐直接在 Web「通知设置」中填写并发送测试邮件，密码仅保存于服务端 `config.json`，接口不回传明文。
+
+改完服务端配置需**重启服务**；改完 Agent 配置需**重启 Agent**。邮件与 Webhook 在界面保存后立即生效。
 
 ## 设备存储与导入导出
 - 所有设备与历史数据保存在 **`data/`** 下（自带文件型存储引擎，无第三方依赖）。程序目录可写时为 `<程序目录>\data`；
@@ -108,7 +129,8 @@ CPU、内存、磁盘、网络速率、进程数、运行时长。
   实际路径会在启动日志与诊断报告中写明，也可用环境变量 `WINMON_DATA_DIR` 指定：
   - `data/store.json`：设备与配置（Agent 主机 `hosts`、探测设备 `targets` / `checks`、触发器 `triggers`、告警 `alerts`），原子写入（临时文件 + 重命名）。
   - `data/history/h<主机ID>/<指标>.bin`：历史指标，按主机与指标分文件的定长二进制序列（每条 16 字节：时间戳 + 数值），范围查询用二分查找，绘图自动降采样。文件名用十六进制编码，避免 `disk.used_pct[C:]` 这类指标名中的 `:` 在 Windows 上非法。
-  - `data/server.log`：运行日志，由服务端自己追加写入（UTF-8 带 BOM，Win7 记事本可直接阅读），带时间戳。
+  - `data/server.log`：服务端运行日志，由服务端自己追加写入（UTF-8 带 BOM，Win7 记事本可直接阅读），带时间戳。
+  - `data/agent.log`：Agent 运行日志，格式同上；`data/agent-state.json` 记录最近一次上报结果，供 `agent.js --status` 判断。
   - 备份/迁移直接复制整个 `data/` 目录即可（建议先停止服务）。
 - **从旧版 SQLite 自动迁移**：v1.4.0 及更早版本使用 `data/monitor.db`。升级后首次启动会自动读取该文件（含未落盘的 `-wal` 日志），把设备、触发器、告警与全部历史数据导入新引擎，随后把旧文件重命名为 `monitor.db.migrated` 保留备份，迁移只执行一次。迁移结果写入 `data/server.log`。
 - **批量导入/导出**：在「主机管理」页工具栏提供 `导入` / `导出` 按钮：
@@ -121,13 +143,16 @@ CPU、内存、磁盘、网络速率、进程数、运行时长。
 ## 目录结构
 ```
 server.js        服务端（Web + API + 探测调度）
-agent.js         Agent 上报端
+agent.js         Agent 上报端（--status 查状态 / --stop 停止）
 preflight.js     启动自检 / 诊断（--quick / --full / --wait=N / --url）
-lib/             采集 / 存储 / 告警 / 邮件通知 / SNMP / 数据库检测 / 探测引擎 / HTTP 客户端 / 路径解析 / 打包
+CONFIG.md        服务端与 Agent 完整配置文档
+lib/             采集 / 存储 / 告警 / 邮件通知 / SNMP / 数据库检测 / 探测引擎 / HTTP 客户端 / 路径解析 / 日志 / 打包
 public/          Web 前端（原生 JS + Canvas，无外部依赖；compat.js 为 ES5 浏览器兼容闸门）
 runtime/         内置 Node.js 运行时（Release 资产：node.exe / node-x86.exe / node-linux）
 pick-node.bat    按系统位数选择运行时
 diagnose.bat     生成中文诊断报告 data/diagnose.txt 并用记事本打开
+agent-background.bat / agent-hidden.vbs   Agent 后台启动（无窗口，关窗口不停止）
+agent-stop.bat   停止后台 Agent
 *.bat / *.vbs    Windows 启动 / 停止 / 打包脚本（纯 ASCII，不使用 chcp）
 make-package.js  纯 Node 打包器（server / agent / linux）
 agent.sh         Linux Agent 启动脚本
